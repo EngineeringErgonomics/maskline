@@ -19,6 +19,7 @@ it replies with a JSON-RPC error and continues.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -39,6 +40,7 @@ SERVER_NAME = "maskline"
 SERVER_VERSION = "1.0.0"
 PROTOCOL_VERSION = "2024-11-05"
 SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION, "2025-06-18"})
+MAX_REQUEST_BYTES = 5 * 1024 * 1024
 
 TOOLS = [
     {
@@ -136,6 +138,32 @@ def _error_reply(request_id, code, message):
         "id": request_id,
         "error": {"code": code, "message": message},
     }
+
+
+def _read_request_line(stream):
+    """Read one bounded request line.
+
+    Returns (kind, raw): kind is "line", "oversize" or "eof". A line
+    longer than MAX_REQUEST_BYTES is drained without keeping it, so
+    the next request can run (N6).
+    """
+    limit = MAX_REQUEST_BYTES + 1
+    try:
+        raw = stream.readline(limit)
+    except TypeError:
+        raw = stream.readline()
+        if len(raw) > limit:
+            return "oversize", b""
+        return ("line", raw) if raw else ("eof", b"")
+    if not raw:
+        return "eof", b""
+    if len(raw) >= limit and not raw.endswith(b"\n"):
+        while True:
+            chunk = stream.readline(65536)
+            if not chunk or chunk.endswith(b"\n"):
+                break
+        return "oversize", b""
+    return "line", raw
 
 
 def _valid_id(value) -> bool:
@@ -290,11 +318,14 @@ def serve(server: MasklineServer, instream, outstream) -> None:
 
     while True:
         try:
-            raw = binary.readline()
+            kind, raw = _read_request_line(binary)
         except (OSError, ValueError):
             break
-        if not raw:
+        if kind == "eof":
             break
+        if kind == "oversize":
+            emit(_error_reply(None, -32600, "Request too large"))
+            continue
         try:
             text = raw.decode("utf-8", errors="strict")
         except (UnicodeDecodeError, AttributeError):
@@ -355,33 +386,42 @@ _SAFE_DISPLAY_RE = re.compile(
 )
 
 
-def display_name(name: str) -> str:
+def display_name(name: str, rules=None, line_count=None) -> str:
     """A safe display form of a file name for a report header (B2).
 
     Only the base name is considered, and the folder part is never
-    printed. Every run of 17 or more characters of letters, digits
-    and the secret delimiters is masked by the same rule as a
-    finding (at most 2 characters at each end); when the name holds
-    a secret-looking keyword, shorter runs are masked too. No other
-    character can defeat the mask.
+    printed. The base name is printed only when every part of it,
+    split at any character outside [A-Za-z0-9_-], is at most 16
+    characters, holds no secret-looking keyword, and matches no
+    scanner rule. Otherwise a hash form is printed:
+    `file: <first 8 hex digits of SHA-256(name)> lines: N`.
     """
+    if rules is None:
+        try:
+            rules = load_rules()[0]
+        except Exception:
+            rules = ()
     base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    digest = hashlib.sha256(name.encode("utf-8", errors="surrogatepass")).hexdigest()[:8]
+
+    def hash_form() -> str:
+        count = "?" if line_count is None else str(line_count)
+        return "file: " + digest + " lines: " + count
+
     if not base:
-        return "<file>"
-
-    def _mask(run: str) -> str:
-        if len(run) <= 16:
-            return "****"
-        return run[:2] + "****" + run[-2:]
-
-    masked = re.sub(
-        r"[A-Za-z0-9+/_=-]{17,}", lambda m: _mask(m.group(0)), base
-    )
+        return hash_form()
     if _SAFE_DISPLAY_RE.search(base):
-        masked = re.sub(
-            r"[A-Za-z0-9+/_=-]{8,}", lambda m: _mask(m.group(0)), masked
-        )
-    return masked
+        return hash_form()
+    parts = re.split(r"[^A-Za-z0-9_-]", base)
+    if not parts or max(len(p.split("-")[-1]) for p in parts) > 16:
+        return hash_form()
+    for part in parts:
+        if len(part) > 16 and not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", part):
+            return hash_form()
+    for rule in rules:
+        if rule.regex.search(base):
+            return hash_form()
+    return base
 
 
 def _demo(root: str, rules) -> int:
@@ -411,7 +451,7 @@ def _demo(root: str, rules) -> int:
         except ScanRefused as exc:
             blocks.append(
                 "maskline report: "
-                + rel
+                + display_name(rel, _server.rules)
                 + "\nRefused: "
                 + str(exc)
                 + "\nexit: 2"
@@ -470,7 +510,9 @@ def main(argv: list[str] | None = None) -> int:
     except ScanRefused as exc:
         _log(str(exc))
         return 2
-    sys.stdout.write(format_report(display_name(filepath), result) + "\n")
+    line_count = max(0, len(result.redacted_text.splitlines()))
+    display = display_name(filepath, server.rules, line_count)
+    sys.stdout.write(format_report(display, result) + "\n")
     if write_path:
         try:
             Path(write_path).write_text(result.redacted_text, encoding="utf-8")

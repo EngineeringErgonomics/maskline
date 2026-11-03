@@ -466,7 +466,11 @@ def scan_text(
         raise ScanRefused(
             "scan refused: text exceeds the 5 MB limit"
         )
-    lines = text.split("\n")
+    # CR counts as a line break (progress-bar logs and old Mac files).
+    # CRLF stays one break, so line numbers still match ^-anchored
+    # traced output.
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
     for line in lines:
         if len(line) > MAX_LINE_CHARS:
             raise ScanRefused(
