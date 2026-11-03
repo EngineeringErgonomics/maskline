@@ -1,0 +1,11 @@
+Build started 2026-11-03 10:00:00 UTC
++ make all
+cc -O2 -c main.c -o main.o
+cc -O2 -c util.c -o util.o
+commit abcdef0123456789abcdef0123456789abcdef01 checked out
+request id 8f3a2b1c-4d5e-4f60-9a1b-2c3d4e5f6071 handled
+count=3 passed, count=0 failed
+the password policy of the test system allows short test words
++ echo hello
+image data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII= loaded
+Build finished: OK

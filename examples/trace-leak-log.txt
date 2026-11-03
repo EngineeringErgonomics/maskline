@@ -1,0 +1,8 @@
+Deploy step started
++ set -e
++ export API_KEY=EXAMPLEFAKEKEYDONOTUSE123456
++ curl -s -H 'Authorization: Bearer EXAMPLEFAKEBEARERTOKEN0123456789' https://example.invalid/api
++ echo step-ok
+----BEGIN EXAMPLE PRIVATE KEY----
++ make package
+Deploy step finished

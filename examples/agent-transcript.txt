@@ -1,0 +1,7 @@
+User: please show the config that the job used
+Assistant: here is the config line from the job:
+GITHUB_TOKEN=EXAMPLEFAKEASSEMBLEDTOKEN9876543210
+Assistant: the job also used this header value:
+Authorization: Bearer EXAMPLEFAKEBEARERTOKEN0123456789
+User: thank you
+Assistant: done

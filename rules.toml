@@ -1,0 +1,58 @@
+# maskline rules
+#
+# The scanner reads these named rules at start. The first block holds the
+# limits and the placeholder values. Each [[rule]] block names one shape.
+# A rule matches one line at a time. Groups that give the secret span:
+#
+#   pem-private-key:   no group -> the whole match
+#   token-prefix:      no group -> the whole match
+#   bearer-token:      group "value"
+#   secret-assignment: group "value"
+#   shell-trace:       group "value"
+#   high-entropy-run:  group "run"
+
+[settings]
+max_file_bytes = 5242880
+placeholder_values = ["example", "changeme", "placeholder", "redacted", "none", "true", "false"]
+placeholder_prefixes = ["your-", "<", "$", "["]
+
+[[rule]]
+name = "pem-private-key"
+pattern = '''-{4,}BEGIN (?:[A-Z0-9 ]* )?PRIVATE KEY-{4,}'''
+description = "PEM private key header line"
+
+[[rule]]
+name = "token-prefix"
+pattern = '''(?:gh[pousr]|git(?:hub)[_]pat|xo[x][baprs]|A(?:KIA)|s(?:k)-(?:proj|ant-api03|svcacct))[_-]?[A-Za-z0-9_+/=-]{12,}'''
+description = "Known token prefix of a source host, chat service, cloud or model provider"
+
+[[rule]]
+name = "bearer-token"
+pattern = '''\bBearer\s+(?P<value>[A-Za-z0-9_.+/=-]{16,})'''
+description = "Authorization bearer token"
+
+[[rule]]
+name = "secret-assignment"
+pattern = '''\b(?P<name>(?i:(?:[A-Za-z_][A-Za-z0-9_]*)?(?:SECRET|TOKEN|PASSWORD|PASSWD|PWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL)[A-Za-z0-9_]*))\s*[:=]\s*["']?(?P<value>[^\s"']{8,})'''
+description = "KEY=value line whose key name looks secret"
+
+[[rule]]
+name = "shell-trace"
+pattern = '''^(?P<plus>\+{1,})\s+(?:export\s+)?(?P<name>(?i:(?:[A-Za-z_][A-Za-z0-9_]*)?(?:SECRET|TOKEN|PASSWORD|PASSWD|PWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL)[A-Za-z0-9_]*))\s*=\s*(?P<value>[^\s"']{8,})'''
+description = "Shell trace line with a secret name and a value"
+
+[[rule]]
+name = "shell-trace-echo"
+pattern = '''^(?P<plus>\+{1,})\s+(?:echo|printf(?:\s+(?:"[^"]*"|'[^']*'|%s|%s\\n))?)\s+(?P<value>[^\s"'][^\s"']{7,})'''
+description = "Shell trace line that prints a value"
+
+[[rule]]
+name = "shell-trace-header"
+pattern = '''^(?P<plus>\+{1,})\s+curl\b.*-H\s*["']?(?P<header>Authorization:\s*(?:Bearer\s+)?(?P<value>[^\s"']{8,}))'''
+description = "Shell trace curl line with an authorization value"
+
+[[rule]]
+name = "high-entropy-run"
+pattern = '''(?P<run>[A-Za-z0-9+/_-]{40,}={0,2})'''
+description = "Long run that may be a key; needs an entropy check and allow-list checks"
+entropy_min = 4.5
