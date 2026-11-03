@@ -33,10 +33,11 @@ VALUE_GROUPS = ("value", "run")  # regex groups that hold the secret span
 # Hard limits for scan_text (B1). The bounded name patterns in
 # rules.toml keep each line fast; these limits keep the whole scan
 # bounded even for hostile text.
-MAX_SCAN_TEXT_CHARS = 5242880  # the same limit as max_file_bytes
+MAX_SCAN_TEXT_CHARS = 5242880  # 5 MB for scan_text and files
 MAX_LINE_CHARS = 1048576
-_CHUNK_CHARS = 262144
-_NAME_CHUNK_OVERLAP = 80
+_CHUNK_CHARS = 65536
+_NAME_CHUNK_OVERLAP = 256
+_MAX_HIDDEN_CHARS = 8192
 
 HEX_RE = re.compile(r"[0-9A-Fa-f]+")
 UUID_RE = re.compile(
@@ -248,7 +249,17 @@ def hidden_spans_for_line(line: str) -> list[tuple[int, int]]:
     if comma == -1:
         return spans
     start = comma + 1
-    end = len(line)
+    # Keep the hidden span bounded and made of image bytes only, so
+    # text after the image on the same line is still scanned (N1a).
+    # Base64 image data is one run; a space, a comma or other prose
+    # ends it.
+    end = start
+    limit = min(len(line), start + _MAX_HIDDEN_CHARS)
+    while end < limit and (
+        line[end].isascii()
+        and (line[end].isalnum() or line[end] in "+/=")
+    ):
+        end += 1
     while end > start and line[end - 1] in " \t\r\n\"')]}>":
         end -= 1
     spans.append((start, end))

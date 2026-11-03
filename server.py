@@ -38,6 +38,7 @@ from maskline import (  # noqa: E402
 SERVER_NAME = "maskline"
 SERVER_VERSION = "1.0.0"
 PROTOCOL_VERSION = "2024-11-05"
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION, "2025-06-18"})
 
 TOOLS = [
     {
@@ -137,15 +138,21 @@ def _error_reply(request_id, code, message):
     }
 
 
+def _valid_id(value) -> bool:
+    """JSON-RPC ids are a string, an integer or null (N3)."""
+    return value is None or isinstance(value, (str, int)) and not isinstance(value, bool)
+
+
 def handle_message(server: MasklineServer, message):
     """Return the JSON-RPC reply object, or None for a notification.
 
     Never raises. A bad shape gives a fixed error reply. No text of
-    the caller reaches a result, an error or a log line, except the
-    request id that JSON-RPC requires in the reply.
+    the caller reaches a result, an error or a log line, except a
+    valid request id that JSON-RPC requires in the reply.
     """
     has_id = isinstance(message, dict) and "id" in message
-    request_id = message.get("id") if has_id else None
+    raw_id = message.get("id") if has_id else None
+    request_id = raw_id if _valid_id(raw_id) else None
     try:
         if not isinstance(message, dict):
             return _error_reply(None, -32600, "Invalid Request")
@@ -153,6 +160,10 @@ def handle_message(server: MasklineServer, message):
         # A notification never gets a reply, even a bad one.
         if is_notification:
             return None
+        if not _valid_id(raw_id):
+            return _error_reply(None, -32600, "Invalid Request")
+        if message.get("jsonrpc") != "2.0":
+            return _error_reply(request_id, -32600, "Invalid Request")
         method = message.get("method")
         if not isinstance(method, str) or not method:
             return _error_reply(request_id, -32600, "Invalid Request")
@@ -170,7 +181,7 @@ def handle_message(server: MasklineServer, message):
                 "id": request_id,
                 "result": {
                     "protocolVersion": client_version
-                    if isinstance(client_version, str) and client_version
+                    if client_version in SUPPORTED_PROTOCOL_VERSIONS
                     else PROTOCOL_VERSION,
                     "capabilities": {"tools": {}},
                     "serverInfo": {
@@ -265,10 +276,11 @@ def serve(server: MasklineServer, instream, outstream) -> None:
 
     def emit(reply) -> None:
         try:
-            line = json.dumps(reply)
+            line = json.dumps(reply, allow_nan=False)
         except Exception:
             line = json.dumps(
-                _error_reply(None, -32603, "Internal error")
+                _error_reply(None, -32603, "Internal error"),
+                allow_nan=False,
             )
         try:
             outstream.write(line + "\n")
@@ -295,6 +307,9 @@ def serve(server: MasklineServer, instream, outstream) -> None:
             message = json.loads(line)
         except (json.JSONDecodeError, ValueError, RecursionError):
             emit(_error_reply(None, -32700, "Parse error"))
+            continue
+        if not hasattr(message, "keys") or not isinstance(message, dict):
+            emit(_error_reply(None, -32600, "Invalid Request"))
             continue
         reply = handle_message(server, message)
         if reply is not None:
