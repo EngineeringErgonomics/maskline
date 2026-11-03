@@ -218,6 +218,76 @@ MUTANTS = [
             "test_maskline.TestReviewFixRound1.test_refusal_message_holds_no_path"
         ],
     },
+    {
+        "id": "M19",
+        "name": "B1 pem dash run unbounded",
+        "file": "rules.toml",
+        "old": "(?<!-)-{4,64}BEGIN",
+        "new": "-{4,}BEGIN",
+        "tests": [
+            "test_maskline.TestReviewFixRound3.test_pem_bounded_pattern"
+        ],
+    },
+    {
+        "id": "M20",
+        "name": "B1 separator rescue removed",
+        "file": "maskline.py",
+        "old": "                if not _looks_like_name_value(line, anchor):",
+        "new": "                if True:",
+        "tests": [
+            "test_maskline.TestReviewFixRound3.test_n1_detection_shapes"
+        ],
+    },
+    {
+        "id": "M21",
+        "name": "B2 display_name returns base name",
+        "file": "server.py",
+        "old": "    if not base:\n        return hash_form()",
+        "new": "    return base\n    if not base:\n        return hash_form()",
+        "tests": [
+            "test_maskline.TestReviewFixRound3.test_cli_file_name_shapes"
+        ],
+    },
+    {
+        "id": "M22",
+        "name": "V10 window overlap removed",
+        "file": "maskline.py",
+        "old": "_NAME_CHUNK_OVERLAP = 256",
+        "new": "_NAME_CHUNK_OVERLAP = 0",
+        "tests": [
+            "test_maskline.TestReviewFixRound3.test_v10_window_overlap_finds_boundary"
+        ],
+    },
+    {
+        "id": "M23",
+        "name": "V11 window duplicate filter removed",
+        "file": "maskline.py",
+        "old": "                    if key not in seen:",
+        "new": "                    if True:",
+        "tests": [
+            "test_maskline.TestReviewFixRound3.test_v11_window_duplicate_filter"
+        ],
+    },
+    {
+        "id": "M24",
+        "name": "V22 data-url hidden span unbounded",
+        "file": "maskline.py",
+        "old": "    limit = min(len(line), start + _MAX_HIDDEN_CHARS)",
+        "new": "    limit = len(line)",
+        "tests": [
+            "test_maskline.TestReviewFixRound3.test_v22_data_url_span_bounded"
+        ],
+    },
+    {
+        "id": "M25",
+        "name": "V29 window step skips overlap",
+        "file": "maskline.py",
+        "old": "                offset += _CHUNK_CHARS",
+        "new": "                offset += _CHUNK_CHARS + _NAME_CHUNK_OVERLAP",
+        "tests": [
+            "test_maskline.TestReviewFixRound3.test_v29_window_step_keeps_overlap"
+        ],
+    },
 ]
 
 

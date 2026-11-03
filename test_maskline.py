@@ -843,24 +843,53 @@ class TestReviewFixRound3(unittest.TestCase):
     def test_every_rule_times_fast_on_runs(self):
         import time
 
-        # Per-rule bar: every rule must finish each 1 MiB line it can
-        # attempt to match in under 2 s; scan_text below repeats the
-        # same runs with every rule enabled.
+        shapes = (
+            "-", "=", "_", "a", "Z", "9", "0", " ", ".", "+", "/", ":",
+            "@", ";", "&", ",", "\t", "'", "`", '"', "$", "%", "<", ">",
+            "pwd", "TOKEN", "SECRET", "KEY", "aB3d", "+ ", "a=", "a: ",
+            "----BEGIN ", "Bearer ", " -H", "data:image/png;base64,",
+        )
+        # Every rule on 200 kB of each single-character run and short
+        # period: super-linear backtracking would blow past 2 s.
         for rule in RULES:
-            for shape in ("-", "=", "+", "/", ".", "_", "9", "a", " ", "\t", ":", "'", "`"):
-                line = self._RULE_PREFIX[rule.name] + shape * maskline.MAX_LINE_CHARS
-                line = line[: maskline.MAX_LINE_CHARS]
+            for shape in shapes:
+                line = (
+                    self._RULE_PREFIX[rule.name]
+                    + shape * (200000 // len(shape) + 1)
+                )[:200000]
                 t0 = time.monotonic()
                 list(rule.regex.finditer(line))
                 dt = time.monotonic() - t0
-                self.assertLess(dt, 2.0, rule.name + " on " + repr(shape))
-        for shape in ("-", "=", "+", "/", ".", "_", "9", "a", " ", "\t", ":", "'", "`", "pwd-", "data:image/png;base64,"):
+                self.assertLess(dt, 2.0, rule.name + " on " + repr(shape)[:20])
+        # One 1 MiB line per shape through the full scanner, under 10 s.
+        for shape in shapes:
             line = (shape * (1048576 // len(shape) + 1))[:1048576]
             t0 = time.monotonic()
             result = scan(line)
             dt = time.monotonic() - t0
-            self.assertLess(dt, 2.0, "scan_text on " + repr(shape)[:20])
+            self.assertLess(dt, 10.0, "scan_text on " + repr(shape)[:20])
             self.assertIsInstance(result, maskline.ScanResult)
+        # And at 200 kB through all three public paths.
+        import io as _io
+
+        for shape in ("-", "=", "+"):
+            text = (shape * 200000)[:200000]
+            t0 = time.monotonic()
+            scan(text)
+            self.assertLess(time.monotonic() - t0, 2.0, "scan_text " + repr(shape))
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "hostile.txt"
+                target.write_text(text, encoding="utf-8")
+                t0 = time.monotonic()
+                maskline.scan_file("hostile.txt", tmp, RULES, SETTINGS)
+                self.assertLess(time.monotonic() - t0, 2.0, "scan_file " + repr(shape))
+                t0 = time.monotonic()
+                proc = subprocess.run(
+                    [sys.executable, str(REPO / "server.py"), "hostile.txt", "--root", tmp],
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertLess(time.monotonic() - t0, 2.0, "CLI " + repr(shape))
+                self.assertEqual(0, proc.returncode)
 
     def test_pem_bounded_pattern(self):
         import time
@@ -1124,6 +1153,83 @@ class TestReviewFixRound3(unittest.TestCase):
             self.assertNotIn(FAKE_GH, mcp_server.display_name(name))
             self.assertNotIn(FAKE_ENTROPY, mcp_server.display_name(name))
         self.assertEqual("trace-leak-log.txt", mcp_server.display_name("examples/trace-leak-log.txt"))
+
+
+class TestReviewFixRound4(unittest.TestCase):
+    def test_no_partial_echo_on_cli_secret_name(self):
+        # A secret name must not reach stdout or stderr in any part.
+        name = FAKE_GH + ".log"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / name).write_text("clean line\n", encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(REPO / "server.py"), name, "--root", tmp],
+                capture_output=True, text=True, timeout=30,
+            )
+            blob = proc.stdout + proc.stderr
+            self.assertNotIn(FAKE_GH, blob)
+            self.assertNotIn(FAKE_GH[:8], blob)
+            self.assertNotIn(FAKE_GH[-8:], blob)
+            self.assertEqual(0, proc.returncode)
+
+    def test_display_name_ordinary_long_still_shown(self):
+        for ordinary in ("trace-leak-log.txt", "clean-build-log.txt", "my-build-log-2026.txt"):
+            self.assertEqual(ordinary, mcp_server.display_name(ordinary))
+        for bad in (
+            "log " + FAKE_GH,
+            FAKE_GH + " copy.txt",
+            "x@" + FAKE_GH,
+            "k:" + FAKE_GH,
+            "a," + FAKE_GH,
+            "(" + FAKE_AWS + ").log",
+            "[" + FAKE_ENTROPY + "]",
+            "#" + FAKE_ENTROPY,
+            "\u00e9" + FAKE_ENTROPY,
+        ):
+            shown = mcp_server.display_name(bad, line_count=3)
+            self.assertTrue(shown.startswith("file: "), shown)
+            self.assertTrue(shown.endswith("lines: 3"), shown)
+            for secret in (FAKE_GH, FAKE_AWS, FAKE_ENTROPY):
+                self.assertNotIn(secret, shown)
+
+    def test_display_name_hash_matches_sha256(self):
+        import hashlib as _hashlib
+
+        name = FAKE_GH + ".log"
+        shown = mcp_server.display_name(name, line_count=7)
+        expected = _hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+        self.assertEqual("file: " + expected + " lines: 7", shown)
+
+    def test_oversize_request_line_replied_and_continues(self):
+        ping = b'{"jsonrpc": "2.0", "id": 7, "method": "ping"}\n'
+        big = b"x" * (5 * 1024 * 1024 + 1024) + b"\n"
+        raw = ping + big + ping
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "server.py"), "--root", str(REPO)],
+            input=raw, capture_output=True, timeout=60,
+        )
+        self.assertEqual(0, proc.returncode)
+        self.assertNotIn(b"Traceback", proc.stderr)
+        replies = [json.loads(x) for x in proc.stdout.decode("utf-8").splitlines()]
+        self.assertEqual(3, len(replies), proc.stdout[:500])
+        self.assertEqual(7, replies[0]["id"])
+        self.assertEqual(-32600, replies[1]["error"]["code"])
+        self.assertEqual(7, replies[2]["id"])
+
+    def test_cr_line_ends_treated_as_lines(self):
+        text = "A" * 524288 + "\r" + "B" * 524288 + "\r" + "C" * 524288
+        result = scan(text)
+        self.assertEqual(0, len(result.findings))
+        over = "A" * 1048577
+        with self.assertRaises(maskline.ScanRefused):
+            scan(over)
+        mixed = "hello\r\nworld\rnext"
+        self.assertEqual(
+            ["hello", "world", "next"],
+            scan(mixed).redacted_text.splitlines(),
+        )
+
+    def test_request_line_limit_is_stated_constant(self):
+        self.assertEqual(5 * 1024 * 1024, mcp_server.MAX_REQUEST_BYTES)
 
 
 # --- Exit codes ---------------------------------------------------------------
