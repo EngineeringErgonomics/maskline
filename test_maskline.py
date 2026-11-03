@@ -563,6 +563,12 @@ class TestReviewFixRound1(unittest.TestCase):
         self.assertNotIn(secret, outstream.getvalue())
 
     def test_merge_extends_span_end(self):
+        merged = maskline.merge_spans(
+            [(0, 10, "rule-a", "x" * 10), (5, 20, "rule-b", "y" * 15)]
+        )
+        self.assertEqual(1, len(merged))
+        self.assertEqual(0, merged[0][0])
+        self.assertEqual(20, merged[0][1])
         text = "Authorization: Bearer " + FAKE_BEARER + "\n"
         result = scan(text)
         self.assertNotIn(FAKE_BEARER, result.redacted_text)
