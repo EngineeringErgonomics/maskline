@@ -1174,22 +1174,118 @@ class TestReviewFixRound4(unittest.TestCase):
     def test_display_name_ordinary_long_still_shown(self):
         for ordinary in ("trace-leak-log.txt", "clean-build-log.txt", "my-build-log-2026.txt"):
             self.assertEqual(ordinary, mcp_server.display_name(ordinary))
-        for bad in (
-            "log " + FAKE_GH,
-            FAKE_GH + " copy.txt",
-            "x@" + FAKE_GH,
-            "k:" + FAKE_GH,
-            "a," + FAKE_GH,
-            "(" + FAKE_AWS + ").log",
-            "[" + FAKE_ENTROPY + "]",
-            "#" + FAKE_ENTROPY,
-            "\u00e9" + FAKE_ENTROPY,
+        r17 = "Ab1c" * 4 + "Z"
+        r24 = "Ab1c" * 6
+        r32 = "Ab1c" * 8
+        hex32 = "0123456789abcdef" * 2
+        pat26 = "gl" + "pat-" + "Ab1c" * 5
+        sk34 = "S" + "K" + hex32
+        uuid36 = "-".join(
+            [
+                "12345678",
+                "abcd",
+                "4abc",
+                "a123",
+                "0123456789ab",
+            ]
+        )
+        for bad, value in (
+            (r17 + "-a.log", r17),
+            (r24 + "-prod.txt", r24),
+            (r32 + "-x.log", r32),
+            (hex32 + "-backup.log", hex32),
+            (pat26 + "-ci.log", pat26),
+            (sk34 + "-x.txt", sk34),
+            (uuid36 + ".txt", uuid36),
+            ("a\\" + r32 + "-x.txt", r32),
+            ("log " + FAKE_GH, FAKE_GH),
+            (FAKE_GH + " copy.txt", FAKE_GH),
+            ("x@" + FAKE_GH, FAKE_GH),
+            ("k:" + FAKE_GH, FAKE_GH),
+            ("a," + FAKE_GH, FAKE_GH),
+            ("(" + FAKE_AWS + ").log", FAKE_AWS),
+            ("[" + FAKE_ENTROPY + "]", FAKE_ENTROPY),
+            ("#" + FAKE_ENTROPY, FAKE_ENTROPY),
+            ("\u00e9" + FAKE_ENTROPY, FAKE_ENTROPY),
         ):
             shown = mcp_server.display_name(bad, line_count=3)
             self.assertTrue(shown.startswith("file: "), shown)
             self.assertTrue(shown.endswith("lines: 3"), shown)
+            self.assertNotIn(value, shown)
             for secret in (FAKE_GH, FAKE_AWS, FAKE_ENTROPY):
                 self.assertNotIn(secret, shown)
+        # Edge shapes of our own: 16 chars shown, 17 chars hashed,
+        # a long run after a dash, a long run before an underscore,
+        # a secret in the folder part, a unicode letter run.
+        for ordinary in ("a" * 16 + ".txt", "ok_" + "a" * 16 + ".txt"):
+            self.assertEqual(ordinary, mcp_server.display_name(ordinary))
+        for bad in (
+            "a" * 17 + ".txt",
+            "ok-" + "a" * 17 + ".txt",
+            "a" * 17 + "_note.txt",
+            "secretfolder/" + "a" * 17 + ".txt",
+            "\u00e9" * 20 + ".txt",
+            "\u00e9" + FAKE_ENTROPY,
+        ):
+            shown = mcp_server.display_name(bad, line_count=1)
+            self.assertTrue(shown.startswith("file: "), shown)
+            self.assertNotIn("aaaaaaaaaaaaaaa", shown)
+            self.assertNotIn(FAKE_ENTROPY, shown)
+
+    def test_cli_file_name_shapes_run_cli(self):
+        r32 = "Ab1c" * 8
+        hex32 = "0123456789abcdef" * 2
+        uuid36 = "-".join(
+            ["12345678", "abcd", "4abc", "a123", "0123456789ab"]
+        )
+        cases = [
+            ("Ab1c" * 4 + "Z" + "-a.log", "Ab1c" * 4 + "Z"),
+            ("Ab1c" * 6 + "-prod.txt", "Ab1c" * 6),
+            (r32 + "-x.log", r32),
+            (hex32 + "-backup.log", hex32),
+            ("gl" + "pat-" + "Ab1c" * 5 + "-ci.log", "gl" + "pat-" + "Ab1c" * 5),
+            ("S" + "K" + hex32 + "-x.txt", "S" + "K" + hex32),
+            (uuid36 + ".txt", uuid36),
+            ("a\\" + r32 + "-x.txt", r32),
+            ("a" * 17 + ".txt", "a" * 17),
+            ("ok-" + "a" * 17 + ".txt", "a" * 17),
+            ("a" * 17 + "_note.txt", "a" * 17),
+            ("x/" + "a" * 17 + ".txt", "a" * 17),
+            ("\u00e9" * 20 + ".txt", "\u00e9" * 20),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, secret in cases:
+                target = Path(tmp) / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("clean line\n", encoding="utf-8")
+                proc = subprocess.run(
+                    [sys.executable, str(REPO / "server.py"), name, "--root", tmp],
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertNotIn(secret, proc.stdout, name)
+                self.assertNotIn(secret, proc.stderr, name)
+                self.assertEqual(0, proc.returncode, name)
+
+    def test_cli_nonutf8_name_hash_form(self):
+        # A name with invalid UTF-8 bytes must not crash the CLI on a
+        # strict UTF-8 stdout; it prints the hash form (N4).
+        rl = "A" * 30
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_tmp = os.fsencode(tmp)
+            name = b"a\xffb.txt"
+            with open(os.path.join(raw_tmp, name), "wb") as fh:
+                fh.write(b"clean\n")
+            env = dict(os.environ)
+            env["PYTHONIOENCODING"] = "utf-8:strict"
+            proc = subprocess.run(
+                [sys.executable.encode(), str(REPO / "server.py").encode(),
+                 name, b"--root", raw_tmp],
+                capture_output=True, timeout=30, env=env,
+            )
+            self.assertEqual(0, proc.returncode, proc.stderr.decode("utf-8", "replace"))
+            self.assertNotIn(b"Traceback", proc.stderr)
+            self.assertTrue(proc.stdout.startswith(b"maskline report: file: "), proc.stdout[:80])
+            self.assertNotIn(rl.encode(), proc.stdout)
 
     def test_display_name_hash_matches_sha256(self):
         import hashlib as _hashlib

@@ -390,9 +390,10 @@ def display_name(name: str, rules=None, line_count=None) -> str:
     """A safe display form of a file name for a report header (B2).
 
     Only the base name is considered, and the folder part is never
-    printed. The base name is printed only when every part of it,
-    split at any character outside [A-Za-z0-9_-], is at most 16
-    characters, holds no secret-looking keyword, and matches no
+    printed. The base name is printed only when every run of
+    [A-Za-z0-9] in it (split at any other character, also at - and _)
+    is at most 16 characters, it holds no secret-looking keyword,
+    it encodes as plain UTF-8 without surrogates, and it matches no
     scanner rule. Otherwise a hash form is printed:
     `file: <first 8 hex digits of SHA-256(name)> lines: N`.
     """
@@ -410,14 +411,26 @@ def display_name(name: str, rules=None, line_count=None) -> str:
 
     if not base:
         return hash_form()
+    try:
+        base.encode("utf-8")
+    except UnicodeEncodeError:
+        return hash_form()
     if _SAFE_DISPLAY_RE.search(base):
         return hash_form()
-    parts = re.split(r"[^A-Za-z0-9_-]", base)
-    if not parts or max(len(p.split("-")[-1]) for p in parts) > 16:
+    runs = re.split(r"[^A-Za-z0-9]", base)
+    if not runs or max((len(r) for r in runs), default=0) > 16:
         return hash_form()
-    for part in parts:
-        if len(part) > 16 and not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", part):
-            return hash_form()
+    unicode_runs = [
+        len(part)
+        for part in re.split(r"[\W_]", base)
+        if part and not part.isascii()
+    ]
+    if unicode_runs and max(unicode_runs) > 16:
+        return hash_form()
+    # A dash-joined series of short hex pieces is a UUID-shaped key,
+    # not an ordinary name (the uuid_key_name shape).
+    if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\..*)?", base):
+        return hash_form()
     for rule in rules:
         if rule.regex.search(base):
             return hash_form()

@@ -159,13 +159,16 @@ exit: 1
   `redacted_text` and `not_checked`. Server log lines on stderr hold
   counts only.
 - Report file names: the command line report header prints the base
-  name only when every part of it, split at any character outside
-  `[A-Za-z0-9_-]`, is at most 16 characters, holds no secret-looking
-  keyword and matches no rule (ordinary names such as
-  `trace-leak-log.txt` still show). Otherwise it prints
+  name only when every run of `[A-Za-z0-9]` in it (split at any other
+  character, also at `-` and `_`) is at most 16 characters, every
+  non-ASCII letter run is at most 16 characters, it is not a
+  UUID-shaped key, it holds no secret-looking keyword and it matches
+  no rule (ordinary names such as `trace-leak-log.txt` still show).
+  A name that is not plain UTF-8 also prints the hash form. Otherwise it prints
   `file: <8 hex digits of the SHA-256 of the name> lines: N`. The
   folder part is never printed, and an MCP result never prints the
-  path or the name.
+  path or the name. In the redacted copy CRLF and CR line ends become
+  LF, while finding line numbers count CR as a line break.
 - Limits: `scan_text` accepts at most 5 MB of text. A line longer
   than 1 MB is refused; a longer line at or below the limit is
   scanned in bounded chunks with a small overlap, so detection at
@@ -236,6 +239,9 @@ holds a full secret value.
   the limit is scanned in 64 KiB windows with a 256 character overlap;
   a key name or a value that crosses a window border outside the
   overlap can still be missed.
+- The separator rescue explores one level only, so a secret after
+  three or more key=value pairs without a secret name may be missed
+  (a false negative; the value stays where it was).
 - Supported shell-trace shapes: a line that starts with one or more
   `+` characters, then `export NAME=value` or `NAME=value` for a
   secret-looking name; `echo` and `printf` print lines; curl lines
