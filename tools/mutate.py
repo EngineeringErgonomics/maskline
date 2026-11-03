@@ -32,13 +32,6 @@ FILES = [
     "tools/mutate.py",
 ]
 
-RULE_BLOCK_END = (
-    "pattern = '''"
-    + r'''\bBearer\s+(?P<value>[A-Za-z0-9_.+/=-]{16,})'''
-    + "'''"
-    + '\ndescription = "Authorization bearer token"'
-)
-
 MUTANTS = [
     {
         "id": "M1",

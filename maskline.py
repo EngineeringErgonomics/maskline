@@ -36,7 +36,6 @@ UUID_RE = re.compile(
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
 )
 SHA256_RE = re.compile(r"[0-9A-Fa-f]{64}")
-SHA_RE = re.compile(r"[0-9A-Fa-f]{40,64}")
 DATA_URL_MARK = "data:image/"
 END_OF_LINE = "\n"
 
@@ -269,11 +268,6 @@ def value_span(match: re.Match) -> tuple[int, int] | None:
     return None
 
 
-def _trailing_trim(line: str, start: int, end: int) -> int:
-    while end > start and line[end - 1] in "\"'":
-        return end
-    return end
-
 
 def _drop_filter(
     value: str, rule: Rule, rule_name: str, settings: dict[str, object]
@@ -300,15 +294,6 @@ def _drop_filter(
         return True
     if SHA256_RE.fullmatch(value) and rule_name != "token-prefix":
         return True
-    if rule_name == "high-entropy-run":
-        if SHA256_RE.fullmatch(value):
-            return True
-        if value.count("_") + value.count("-") >= 3 and re.fullmatch(
-            r"[A-Za-z0-9_-]+", value
-        ):
-            # A path-like name without slash characters is kept as a
-            # finding only when the entropy gate below also passes.
-            pass
     if rule.entropy_min is not None:
         if shannon_entropy(value) < rule.entropy_min:
             return True
@@ -341,15 +326,10 @@ def scan_text(
                 if start >= end:
                     continue
                 value = line[start:end]
-                # The assignment and trace value groups can swallow
-                # trailing JSON shape; keep the run to the end.
                 if _inside_hidden(start, end, hidden):
                     continue
                 if _drop_filter(value, rule, rule.name, settings):
                     continue
-                if rule.name == "high-entropy-run":
-                    if SHA256_RE.fullmatch(value) or UUID_RE.fullmatch(value):
-                        continue
                 candidates.append((start, end, rule.name, value))
 
         merged = merge_spans(candidates)
