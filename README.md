@@ -81,7 +81,7 @@ Unit tests:
 
     python3 -m unittest
 
-Mutation controls (12 deliberate defects; each must fail a named test):
+Mutation controls (25 deliberate defects; each must fail a named test):
 
     python3 tools/mutate.py
 
@@ -158,15 +158,20 @@ exit: 1
 - MCP tool results: one JSON text content with `findings`,
   `redacted_text` and `not_checked`. Server log lines on stderr hold
   counts only.
-- Report file names: the command line report header prints only the
-  safe display form of the base name (the folder is never printed).
-  Every run of 17 or more secret characters in the base name is masked
-  to at most 2 characters at each end. An MCP result never prints the
+- Report file names: the command line report header prints the base
+  name only when every part of it, split at any character outside
+  `[A-Za-z0-9_-]`, is at most 16 characters, holds no secret-looking
+  keyword and matches no rule (ordinary names such as
+  `trace-leak-log.txt` still show). Otherwise it prints
+  `file: <8 hex digits of the SHA-256 of the name> lines: N`. The
+  folder part is never printed, and an MCP result never prints the
   path or the name.
 - Limits: `scan_text` accepts at most 5 MB of text. A line longer
   than 1 MB is refused; a longer line at or below the limit is
   scanned in bounded chunks with a small overlap, so detection at
-  the chunk borders is near-exact (see Limitations).
+  the chunk borders is near-exact (see Limitations). One MCP request
+  line is at most 5 MB; a longer line gets error -32600 and the
+  server keeps reading. CR counts as a line break for the line limit.
 
 ## Rules
 
