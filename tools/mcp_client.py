@@ -71,7 +71,7 @@ def _fail(text: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     server_path = str(Path(__file__).resolve().parent.parent / "server.py")
-    root = str(Path.cwd())
+    root = None
     i = 0
     while i < len(argv):
         if argv[i] == "--server" and i + 1 < len(argv):
@@ -85,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
+        if root is None:
+            root = str(tmp_path)
         sample = tmp_path / "sample.txt"
         sample.write_text(
             "hello\n"
@@ -128,29 +130,17 @@ def main(argv: list[str] | None = None) -> int:
             return _fail("scan_text leaked a secret value")
         print("tools/call scan_text: ok (1 finding, value masked)")
 
-        try:
-            rel = str(sample.relative_to(Path(root).resolve()))
-        except ValueError:
-            rel = str(sample)
+        # One server process for the whole script: the stderr check
+        # below must read the log of the process that got the secret
+        # text (N9). The root is the temporary folder unless the
+        # caller gave one; the sample is written inside it.
+        rel = "sample.txt" if Path(root).resolve() == tmp_path.resolve() else str(sample)
         call2 = client.request(
             "tools/call", {"name": "scan_file", "arguments": {"path": rel}}
         )
         result2 = call2.get("result", {})
-        if result2.get("isError", True):
-            # The sample is in a temporary folder. Start a second
-            # client whose root is that folder.
-            err = client.close()
-            client = Client(server_path, str(tmp_path))
-            client.request("initialize", {"protocolVersion": "2024-11-05",
-                                          "capabilities": {}, "clientInfo":
-                                          {"name": "mcp_client", "version": "1.0"}})
-            call2 = client.request(
-                "tools/call",
-                {"name": "scan_file", "arguments": {"path": "sample.txt"}},
-            )
-            result2 = call2.get("result", {})
-            if result2.get("isError"):
-                return _fail("scan_file call was an error")
+        if result2.get("isError"):
+            return _fail("scan_file call was an error")
         text_out2 = result2["content"][0]["text"]
         payload2 = json.loads(text_out2)
         if len(payload2["findings"]) != 3:
@@ -163,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         print("tools/call scan_file: ok (3 findings, values masked)")
 
         unknown = client.request(
-            "tools/call", {"name": "does_not_exist", "arguments": {}}
+            "tools/call", {"name": _FRAG_GH, "arguments": {}}
         )
         if not unknown.get("result", {}).get("isError"):
             return _fail("an unknown tool did not give isError")
@@ -172,7 +162,9 @@ def main(argv: list[str] | None = None) -> int:
         err_log = client.close()
         if _FAKE_KEY in err_log or _FAKE_TOK in err_log or _FRAG_GH in err_log:
             return _fail("the server error log held a secret value")
-        print("server log: ok (counts only)")
+        if "tool=<unknown> refused" not in err_log:
+            return _fail("the server error log did not hold the unknown-tool line")
+        print("server log: ok (counts only, first process, unknown tool masked)")
     print("mcp_client: all checks passed")
     return 0
 

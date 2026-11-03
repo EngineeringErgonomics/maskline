@@ -154,6 +154,70 @@ MUTANTS = [
             "test_maskline.TestRedactionInvariants.test_no_secret_in_output"
         ],
     },
+    {
+        "id": "M13",
+        "name": "R4 root check by string prefix",
+        "file": "maskline.py",
+        "old": "        inside = os.path.commonpath([str(resolved), str(root_path)]) == str(\n"
+        "            root_path\n"
+        "        )",
+        "new": "        inside = str(resolved).startswith(str(root_path))",
+        "tests": [
+            "test_maskline.TestReviewFixRound1.test_sibling_prefix_path_refused"
+        ],
+    },
+    {
+        "id": "M14",
+        "name": "R10 error result includes arguments",
+        "file": "server.py",
+        "old": '"content": [{"type": "text", "text": str(exc)}],',
+        "new": '"content": [{"type": "text", "text": str(exc) + " " + json.dumps(arguments)}],',
+        "tests": [
+            "test_maskline.TestReviewFixRound1.test_error_result_holds_no_arguments"
+        ],
+    },
+    {
+        "id": "M15",
+        "name": "R11 stderr log includes input",
+        "file": "server.py",
+        "old": '+ str(len(payload["findings"]))',
+        "new": '+ str(len(payload["findings"])) + " text=" + str(arguments)',
+        "tests": [
+            "test_maskline.TestReviewFixRound1.test_stderr_holds_no_input_text"
+        ],
+    },
+    {
+        "id": "M16",
+        "name": "R13 merge end not extended",
+        "file": "maskline.py",
+        "old": "            if end > int(merged[-1][1]):\n                merged[-1][1] = end",
+        "new": "            if False:\n                merged[-1][1] = end",
+        "tests": [
+            "test_maskline.TestReviewFixRound1.test_merge_extends_span_end"
+        ],
+    },
+    {
+        "id": "M17",
+        "name": "R14 parse error echoes line",
+        "file": "server.py",
+        "old": "except (json.JSONDecodeError, ValueError, RecursionError):\n"
+        '            emit(_error_reply(None, -32700, "Parse error"))',
+        "new": "except (json.JSONDecodeError, ValueError, RecursionError):\n"
+        '            emit(_error_reply(None, -32700, "Parse error: " + line[:300]))',
+        "tests": [
+            "test_maskline.TestReviewFixRound1.test_parse_error_holds_no_input"
+        ],
+    },
+    {
+        "id": "M18",
+        "name": "R17 refusal text holds path",
+        "file": "maskline.py",
+        "old": '"scan_file refused: path is outside the allowed root folder"',
+        "new": '"scan_file refused: path is outside the allowed root folder: " + raw_path',
+        "tests": [
+            "test_maskline.TestReviewFixRound1.test_refusal_message_holds_no_path"
+        ],
+    },
 ]
 
 

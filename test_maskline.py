@@ -345,11 +345,14 @@ class TestScanFileLimits(unittest.TestCase):
             maskline.scan_file("link.txt", str(self.root), RULES, SETTINGS)
 
     def test_scan_file_too_large_refused(self):
+        # A file just over the 5 MB limit, made of short lines. The
+        # message must carry the file-size refusal, so a doubled
+        # file limit (which then hits only the text limit) fails.
         big = self.root / "big.txt"
-        big.write_bytes(b"x" * (5 * 1024 * 1024 + 1))
+        big.write_text(("x" * 100 + "\n") * 62000, encoding="utf-8")
         with self.assertRaises(maskline.ScanRefused) as ctx:
             maskline.scan_file("big.txt", str(self.root), RULES, SETTINGS)
-        self.assertIn("limit", str(ctx.exception))
+        self.assertIn("file exceeds the 5 MB limit", str(ctx.exception))
 
     def test_scan_file_binary_refused(self):
         binary = self.root / "blob.bin"
@@ -455,7 +458,7 @@ class TestReviewFixRound1(unittest.TestCase):
     def test_timing_hostile_keyword_runs(self):
         import time
 
-        for unit in ("pwd", "TOKEN", "SecretToken"):
+        for unit in ("pwd", "TOKEN", "SecretToken", "SECRET", "KEY"):
             text = (unit * (200000 // len(unit) + 1))[:200000] + "\n"
             t0 = time.monotonic()
             result = scan(text)
@@ -489,6 +492,7 @@ class TestReviewFixRound1(unittest.TestCase):
 
     def test_scan_text_size_limit(self):
         # Many short lines, so only the total text limit can refuse.
+        # The scan_text limit is 5 MB, the same as the file limit.
         text = ("x" * 100 + "\n") * 52000
         self.assertGreater(len(text), 5 * 1024 * 1024)
         with self.assertRaises(maskline.ScanRefused):
@@ -704,6 +708,120 @@ class TestReviewFixRound1(unittest.TestCase):
                 blocks = re.findall(r"```text\n(.*?)```", readme, re.S)
                 self.assertTrue(blocks)
                 self.assertEqual(blocks[0], proc.stdout)
+
+
+class TestReviewFixRound2(unittest.TestCase):
+    def test_initialize_answers_supported_version(self):
+        srv = mcp_server.MasklineServer(str(REPO))
+        reply = mcp_server.handle_message(
+            srv,
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "1999-01-01"}},
+        )
+        self.assertEqual(
+            mcp_server.PROTOCOL_VERSION,
+            reply["result"]["protocolVersion"],
+        )
+        reply2 = mcp_server.handle_message(
+            srv,
+            {"jsonrpc": "2.0", "id": 2, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18"}},
+        )
+        self.assertEqual("2025-06-18", reply2["result"]["protocolVersion"])
+
+    def test_jsonrpc_version_enforced(self):
+        srv = mcp_server.MasklineServer(str(REPO))
+        reply = mcp_server.handle_message(
+            srv, {"jsonrpc": "1.0", "id": 1, "method": "ping"}
+        )
+        self.assertEqual(-32600, reply["error"]["code"])
+        reply = mcp_server.handle_message(srv, {"id": 2, "method": "ping"})
+        self.assertEqual(-32600, reply["error"]["code"])
+
+    def test_invalid_id_refused(self):
+        srv = mcp_server.MasklineServer(str(REPO))
+        for bad in (1.5, True, [1], {"a": 1}):
+            reply = mcp_server.handle_message(
+                srv, {"jsonrpc": "2.0", "id": bad, "method": "ping"}
+            )
+            self.assertEqual(-32600, reply["error"]["code"])
+            self.assertIsNone(reply["id"])
+
+    def test_nan_id_never_on_stdout(self):
+        import io
+
+        srv = mcp_server.MasklineServer(str(REPO))
+        instream = io.StringIO(
+            '{"jsonrpc": "2.0", "id": NaN, "method": "ping"}\n'
+            '{"jsonrpc": "2.0", "id": 1e400, "method": "ping"}\n'
+        )
+        outstream = io.StringIO()
+        mcp_server.serve(srv, instream, outstream)
+        out = outstream.getvalue()
+        self.assertNotIn("NaN", out)
+        self.assertNotIn("Infinity", out)
+        for line in out.splitlines():
+            json.loads(line)
+
+    def test_data_url_suffix_still_scanned(self):
+        text = (
+            "image data:image/png;base64,iVBORw0KGgoAAAAA ticket "
+            + FAKE_GH + " end\n"
+        )
+        result = scan(text)
+        self.assertIn("token-prefix", rule_names(result))
+        self.assertNotIn(FAKE_GH, result.redacted_text)
+        clean = scan("image " + DATA_URL + " loaded\n")
+        self.assertEqual([], clean.findings)
+
+    def test_cli_secret_filename_not_echoed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            name = FAKE_GH + ".log"
+            target = Path(tmp) / name
+            target.write_text("clean line\n", encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(REPO / "server.py"), name,
+                 "--root", tmp],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotIn(FAKE_GH, proc.stdout)
+            self.assertNotIn(FAKE_GH, proc.stderr)
+
+    def test_cli_unreadable_exits_two(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("mode 000 is readable as root")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "no-read.txt"
+            target.write_text("API_KEY=" + FAKE_KEY + "\n", encoding="utf-8")
+            os.chmod(target, 0)
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(REPO / "server.py"), "no-read.txt",
+                     "--root", tmp],
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(2, proc.returncode)
+                self.assertNotIn("Traceback", proc.stderr)
+                self.assertNotIn(FAKE_KEY, proc.stderr)
+            finally:
+                os.chmod(target, 0o644)
+
+    def test_timing_cli_hostile_file(self):
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "hostile.txt"
+            for unit in ("pwd", "TOKEN"):
+                target.write_text((unit * 40000)[: 200000 if unit == "TOKEN" else 200001] + "\n",
+                                  encoding="utf-8")
+                t0 = time.monotonic()
+                proc = subprocess.run(
+                    [sys.executable, str(REPO / "server.py"), "hostile.txt",
+                     "--root", tmp],
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertLess(time.monotonic() - t0, 4.0, unit)
+                self.assertEqual(0, proc.returncode)
 
 
 # --- Exit codes ---------------------------------------------------------------
