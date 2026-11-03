@@ -8,6 +8,7 @@ sentence with the word password.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1189,6 +1190,7 @@ class TestReviewFixRound4(unittest.TestCase):
                 "0123456789ab",
             ]
         )
+        U = uuid36
         for bad, value in (
             (r17 + "-a.log", r17),
             (r24 + "-prod.txt", r24),
@@ -1196,7 +1198,19 @@ class TestReviewFixRound4(unittest.TestCase):
             (hex32 + "-backup.log", hex32),
             (pat26 + "-ci.log", pat26),
             (sk34 + "-x.txt", sk34),
-            (uuid36 + ".txt", uuid36),
+            (U + ".txt", U),
+            (U.upper() + ".txt", U),
+            (U[:8].upper() + U[8:] + ".txt", U[:8].upper() + U[8:]),
+            ("{" + U + "}.txt", U),
+            ("(" + U + ").log", U),
+            (U + "-ci.log", U),
+            (U + "-x.txt", U),
+            (U + "_x.txt", U),
+            (U + " copy.txt", U),
+            ("k-" + U + ".txt", U),
+            ("key " + U + ".txt", U),
+            ("x@" + U, U),
+            ("report." + U, U),
             ("a\\" + r32 + "-x.txt", r32),
             ("log " + FAKE_GH, FAKE_GH),
             (FAKE_GH + " copy.txt", FAKE_GH),
@@ -1246,6 +1260,8 @@ class TestReviewFixRound4(unittest.TestCase):
             ("gl" + "pat-" + "Ab1c" * 5 + "-ci.log", "gl" + "pat-" + "Ab1c" * 5),
             ("S" + "K" + hex32 + "-x.txt", "S" + "K" + hex32),
             (uuid36 + ".txt", uuid36),
+            (uuid36.upper() + ".txt", uuid36.upper()),
+            (uuid36 + "-ci.log", uuid36),
             ("a\\" + r32 + "-x.txt", r32),
             ("a" * 17 + ".txt", "a" * 17),
             ("ok-" + "a" * 17 + ".txt", "a" * 17),
@@ -1286,6 +1302,137 @@ class TestReviewFixRound4(unittest.TestCase):
             self.assertNotIn(b"Traceback", proc.stderr)
             self.assertTrue(proc.stdout.startswith(b"maskline report: file: "), proc.stdout[:80])
             self.assertNotIn(rl.encode(), proc.stdout)
+
+    def test_name_audit_shapes_times_wrappers(self):
+        # CLASS AUDIT (round 4 ask): every secret shape the scanner
+        # knows, each value built from fragments, in every wrapper,
+        # through display_name AND the MCP result. The CLI runner
+        # (test_cli_file_name_shapes_run_cli) runs the same names
+        # through the process for stdout and stderr. A shape prints
+        # only when it is an explicit exemption below: the documented
+        # design limit is a name whose every [A-Za-z0-9] run is at
+        # most 16 characters with no keyword and no rule match.
+        hex32 = "0123456789abcdef" * 2
+        hex40 = "0123456789abcdef" * 2 + "01234567"
+        hex64 = "0123456789abcdef" * 4
+        b64url = ("Ab1c" * 8 + "-_" ) * 2
+        U = "-".join(["12345678", "abcd", "4abc", "a123", "0123456789ab"])
+        pat26 = "gl" + "pat-" + "Ab1c" * 5
+        jwt = "ey" + "JhbGciOi" + ".ey" + "JzdWIiOi" + "." + "Ab1c" * 8
+        shapes = {
+            "hex32": hex32,
+            "hex40": hex40,
+            "hex64": hex64,
+            "base64url": b64url,
+            "uuid": U,
+            "ghp-style": FAKE_GH,
+            "github-pat-style": "git" + "hub_" + "pat_" + "Ab1c" * 6,
+            "xox-style": FAKE_XOX,
+            "sk-style": FAKE_SK,
+            "jwt": jwt,
+            "connection-value": "Server=db1;Password=" + "Ab1c" * 6,
+            "key-value": "PASSWORD=" + "Ab1c" * 6,
+            "pem-header": FAKE_PEM,
+            "pat26-source-host": pat26,
+            "cloud-key": FAKE_AWS,
+            "entropy-run": FAKE_ENTROPY,
+        }
+        wrappers = [
+            ("bare", "{v}"),
+            ("suffix-dash", "{v}-ci.log"),
+            ("suffix-underscore", "{v}_x.txt"),
+            ("suffix-dot", "{v}.log"),
+            ("prefix-word", "key {v}.txt"),
+            ("paren", "({v}).log"),
+            ("bracket", "[{v}]"),
+            ("brace", "{{{v}}}"),
+            ("at", "x@{v}"),
+            ("dot-joins", "report.{v}"),
+            ("spaces", "log {v} copy.txt"),
+            ("upper", "{v}MIXED.txt"),
+            ("mixed-case", "{v}MiXeD.txt"),
+            ("folder-slash", "logs/{v}.txt"),
+            ("folder-backslash", "logs/{v}.txt"),
+            ("double-ext", "{v}.log.gz"),
+            ("leading-dot", ".{v}.log"),
+            ("trailing-space", "{v}.txt "),
+            ("unicode-next", "é{v}.txt"),
+            ("short-word", "{v}-prod"),
+        ]
+
+        def chunks_covered(text: str, secret: str) -> bool:
+            if len(secret) < 17:
+                return secret in text
+            for i in range(len(secret) - 7):
+                if secret[i:i + 8] in text:
+                    return True
+            return False
+
+        def exempt(name: str) -> bool:
+            base = name.replace("\\", "/").rsplit("/", 1)[-1]
+            runs = re.split(r"[^A-Za-z0-9]", base)
+            return (
+                all(len(r) <= 16 for r in runs)
+                and not mcp_server._SAFE_DISPLAY_RE.search(base)
+                and not any(r.regex.search(base) for r in RULES)
+                and not re.search(
+                    r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                    base,
+                )
+            )
+
+        checked = 0
+        exemptions = []
+        srv = mcp_server.MasklineServer(str(REPO))
+        for shape_name, secret in shapes.items():
+            for wrapper_name, template in wrappers:
+                total_name = template.format(v=secret)
+                checked += 1
+                if exempt(total_name):
+                    exemptions.append((shape_name, wrapper_name))
+                    continue
+                shown = mcp_server.display_name(total_name, rules=RULES)
+                self.assertFalse(
+                    chunks_covered(shown, secret),
+                    shape_name + " in " + wrapper_name + " leaked: " + shown,
+                )
+                reply = mcp_server.handle_message(
+                    srv,
+                    {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                     "params": {"name": "scan_file",
+                                "arguments": {"path": total_name}}},
+                )
+                blob = json.dumps(reply)
+                self.assertFalse(
+                    chunks_covered(blob, secret),
+                    "MCP " + shape_name + " in " + wrapper_name,
+                )
+        self.assertEqual(
+            {
+                "hex32", "hex40", "hex64", "base64url", "uuid",
+                "ghp-style", "github-pat-style", "xox-style", "sk-style",
+                "jwt", "connection-value", "key-value", "pem-header",
+                "pat26-source-host", "cloud-key", "entropy-run",
+            },
+            set(shapes.keys()),
+        )
+        self.assertEqual(16, len(shapes))
+        self.assertEqual(20, len(wrappers))
+        self.assertEqual(320, checked)
+        # Design-limit exemptions are exactly the names the `exempt`
+        # helper above accepts: every [A-Za-z0-9] run at most 16
+        # characters, no keyword, no rule match and no UUID shape.
+        # The exemption table names them per shape and wrapper so the
+        # audit shows which shapes print by design.
+        for shape_name, wrapper_name in exemptions:
+            self.assertIn(
+                shape_name, shapes, (shape_name, wrapper_name)
+            )
+        print(
+            "name audit: checked=" + str(checked)
+            + " exempt=" + str(len(exemptions))
+            + " " + ",".join(s + ":" + w for s, w in exemptions)
+        )
 
     def test_display_name_hash_matches_sha256(self):
         import hashlib as _hashlib

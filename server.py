@@ -427,9 +427,9 @@ def display_name(name: str, rules=None, line_count=None) -> str:
     ]
     if unicode_runs and max(unicode_runs) > 16:
         return hash_form()
-    # A dash-joined series of short hex pieces is a UUID-shaped key,
-    # not an ordinary name (the uuid_key_name shape).
-    if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\..*)?", base):
+    # A UUID-shaped key (8-4-4-4-12 hex digits, any case, anywhere in
+    # the name) is a key, not an ordinary name.
+    if re.search(r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", base):
         return hash_form()
     for rule in rules:
         if rule.regex.search(base):

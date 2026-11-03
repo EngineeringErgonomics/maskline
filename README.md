@@ -161,9 +161,10 @@ exit: 1
 - Report file names: the command line report header prints the base
   name only when every run of `[A-Za-z0-9]` in it (split at any other
   character, also at `-` and `_`) is at most 16 characters, every
-  non-ASCII letter run is at most 16 characters, it is not a
-  UUID-shaped key, it holds no secret-looking keyword and it matches
-  no rule (ordinary names such as `trace-leak-log.txt` still show).
+  non-ASCII letter run is at most 16 characters, it holds no
+  UUID-shaped key (8-4-4-4-12 hex digits, any case, anywhere in the
+  name), it holds no secret-looking keyword and it matches no rule
+  (ordinary names such as `trace-leak-log.txt` still show).
   A name that is not plain UTF-8 also prints the hash form. Otherwise it prints
   `file: <8 hex digits of the SHA-256 of the name> lines: N`. The
   folder part is never printed, and an MCP result never prints the
@@ -240,7 +241,7 @@ holds a full secret value.
   a key name or a value that crosses a window border outside the
   overlap can still be missed.
 - The separator rescue explores one level only, so a secret after
-  three or more key=value pairs without a secret name may be missed
+  two or more key=value pairs without a secret name may be missed
   (a false negative; the value stays where it was).
 - Supported shell-trace shapes: a line that starts with one or more
   `+` characters, then `export NAME=value` or `NAME=value` for a
