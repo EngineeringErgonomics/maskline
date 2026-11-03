@@ -206,19 +206,19 @@ holds a full secret value.
   split across lines, prose with no key shape, and secret formats not
   listed in `rules.toml`.
 - Measured detection gaps (false negatives). Each one is a secret the
-  scanner does NOT find today:
-  - A `data:image/...,` or `...,base64,` marker hides only the image
-    data run itself (at most 8192 characters of base64). Text after
-    that run on the same line is scanned.
-  - The JSON key form `"password": "value"` is not matched (the
+  scanner does NOT find today, unless a line says a case is now fixed:
+  - N1(a), fixed: a `data:image/...,` or `...,base64,` marker hides
+    only the image data run itself (at most 8192 characters of base64).
+    Text after that run on the same line is scanned.
+  - N1(b): the JSON key form `"password": "value"` is not matched (the
     assignment rule needs the keyword outside quote characters and
     before the separator).
-  - The authorization token form `curl -H 'Authorization: token VALUE'`
+  - N1(c): the authorization token form `curl -H 'Authorization: token VALUE'`
     (without the word `Bearer`) is not flagged.
-  - A PEM body: the header line is flagged and long body lines may be
+  - N1(f): a PEM body: the header line is flagged and long body lines may be
     flagged by the entropy rule, but the last short body line of key
     material stays in the redacted copy.
-  - URL credentials of the form `https://user:VALUE@host` are not
+  - N1(d): URL credentials of the form `https://user:VALUE@host` are not
     flagged unless another rule matches the value.
   - A value with zero-width or look-alike characters inside it is
     not matched as one value.

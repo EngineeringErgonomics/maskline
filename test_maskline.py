@@ -811,8 +811,8 @@ class TestReviewFixRound2(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "hostile.txt"
-            for unit in ("pwd", "TOKEN"):
-                target.write_text((unit * 40000)[: 200000 if unit == "TOKEN" else 200001] + "\n",
+            for unit in ("pwd", "TOKEN", "SECRET", "KEY"):
+                target.write_text((unit * 40000)[:200000] + "\n",
                                   encoding="utf-8")
                 t0 = time.monotonic()
                 proc = subprocess.run(
