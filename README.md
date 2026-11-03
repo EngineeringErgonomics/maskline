@@ -36,7 +36,8 @@ Demo (one command, scans three bundled synthetic inputs):
 
     python3 server.py --demo
 
-Scan one file and print a report:
+Scan one file and print a report. A relative path is resolved below
+the root folder (the default root is the current folder):
 
     python3 server.py path/to/build.log
 
@@ -44,9 +45,12 @@ Scan one file and write the redacted copy:
 
     python3 server.py path/to/build.log --write build.redacted.log
 
-Scan one file under a root folder:
+Scan one file under a root folder. The file path is relative to the
+root folder, so with `--root examples` the first command below names
+the same file as the second one with the default root:
 
-    python3 server.py path/to/build.log --root folder
+    python3 server.py trace-leak-log.txt --root examples
+    python3 server.py examples/trace-leak-log.txt
 
 MCP server over stdio:
 
@@ -148,10 +152,19 @@ exit: 1
 - Report: counts per rule, one line per finding, and a line that names
   what was NOT checked.
 - Exit codes in command line mode: 0 = no findings, 1 = one or more
-  findings, 2 = usage error or a refused file.
+  findings, 2 = usage error or a refused file (this includes an
+  unreadable file, which gives exit 2 with the fixed refusal message
+  and no traceback).
 - MCP tool results: one JSON text content with `findings`,
   `redacted_text` and `not_checked`. Server log lines on stderr hold
   counts only.
+- Report file names: the command line report header prints a safe
+  display name only. A secret-shaped file name is shown as
+  `<redacted-name>`.
+- Limits: `scan_text` accepts at most 5 MB of text. A line longer
+  than 1 MB is refused; a longer line at or below the limit is
+  scanned in bounded chunks with a small overlap, so detection at
+  the chunk borders is near-exact (see Limitations).
 
 ## Rules
 
@@ -192,6 +205,30 @@ holds a full secret value.
 - Not checked: binary content, encoded or compressed forms, secrets
   split across lines, prose with no key shape, and secret formats not
   listed in `rules.toml`.
+- Measured detection gaps (false negatives). Each one is a secret the
+  scanner does NOT find today:
+  - A `data:image/...,` or `...,base64,` marker hides the rest of the
+    line: a secret value after the comma on the same line is not
+    scanned.
+  - The JSON key form `"password": "value"` is not matched (the
+    assignment rule needs the keyword outside quote characters and
+    before the separator).
+  - The authorization token form `curl -H 'Authorization: token VALUE'`
+    (without the word `Bearer`) is not flagged.
+  - A PEM body: the header line is flagged and long body lines may be
+    flagged by the entropy rule, but the last short body line of key
+    material stays in the redacted copy.
+  - URL credentials of the form `https://user:VALUE@host` are not
+    flagged unless another rule matches the value.
+  - A value with zero-width or look-alike characters inside it is
+    not matched as one value.
+  - A value that holds `[REDACTED:` or starts with `$`, `<`, `[` or
+    `your-` is never a finding (it is treated as already redacted or
+    as a placeholder).
+- Long lines: a line longer than 1 MB is refused. A line at or below
+  the limit is scanned in bounded chunks that overlap by a few characters;
+  a key name or a value that crosses a chunk border outside the
+  overlap can still be missed.
 - Supported shell-trace shapes: a line that starts with one or more
   `+` characters, then `export NAME=value` or `NAME=value` for a
   secret-looking name; `echo` and `printf` print lines; curl lines
