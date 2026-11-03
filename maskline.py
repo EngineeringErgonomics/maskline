@@ -385,7 +385,7 @@ def _collect_candidates(
             # the rest of a query, connection-string or argument-chain
             # value (for example "user=admin&password=V"). Each such
             # tail is split once on its separators, and only bounded
-            # segments are probed — so no quadratic re-scan is possible.
+            # segments are probed, so no quadratic re-scan is possible.
             # The manual pre-parse rejects non-candidates (for example
             # a repeated "data:...;base64," marker) in linear time
             # before any regex call.
