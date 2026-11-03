@@ -207,9 +207,9 @@ holds a full secret value.
   listed in `rules.toml`.
 - Measured detection gaps (false negatives). Each one is a secret the
   scanner does NOT find today:
-  - A `data:image/...,` or `...,base64,` marker hides the rest of the
-    line: a secret value after the comma on the same line is not
-    scanned.
+  - A `data:image/...,` or `...,base64,` marker hides only the image
+    data run itself (at most 8192 characters of base64). Text after
+    that run on the same line is scanned.
   - The JSON key form `"password": "value"` is not matched (the
     assignment rule needs the keyword outside quote characters and
     before the separator).
@@ -226,8 +226,8 @@ holds a full secret value.
     `your-` is never a finding (it is treated as already redacted or
     as a placeholder).
 - Long lines: a line longer than 1 MB is refused. A line at or below
-  the limit is scanned in bounded chunks that overlap by a few characters;
-  a key name or a value that crosses a chunk border outside the
+  the limit is scanned in 64 KiB windows with a 256 character overlap;
+  a key name or a value that crosses a window border outside the
   overlap can still be missed.
 - Supported shell-trace shapes: a line that starts with one or more
   `+` characters, then `export NAME=value` or `NAME=value` for a
