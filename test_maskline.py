@@ -448,6 +448,258 @@ class TestMcpProtocol(unittest.TestCase):
         self.assertEqual(5, replies[1]["id"])
 
 
+# --- Review fixes B1 to B3, N3, R4/R10/R11/R13/R14/R17 ----------------------
+
+
+class TestReviewFixRound1(unittest.TestCase):
+    def test_timing_hostile_keyword_runs(self):
+        import time
+
+        for unit in ("pwd", "TOKEN", "SecretToken"):
+            text = (unit * (200000 // len(unit) + 1))[:200000] + "\n"
+            t0 = time.monotonic()
+            result = scan(text)
+            dt = time.monotonic() - t0
+            self.assertLess(dt, 2.0, unit)
+            self.assertEqual([], result.findings)
+
+    def test_timing_five_mb_single_line(self):
+        import time
+
+        text = "pwd" * (5 * 1024 * 1024 // 3 + 1)
+        text = text[: 5 * 1024 * 1024]
+        self.assertEqual(5 * 1024 * 1024, len(text))
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "oneline.txt"
+            target.write_text(text, encoding="utf-8")
+            t0 = time.monotonic()
+            with self.assertRaises(maskline.ScanRefused):
+                maskline.scan_file("oneline.txt", tmp, RULES, SETTINGS)
+            self.assertLess(time.monotonic() - t0, 5.0)
+
+    def test_timing_line_at_limit(self):
+        import time
+
+        text = ("pwdTOKEN" * 140000)[: 1024 * 1024]
+        self.assertEqual(1024 * 1024, len(text))
+        t0 = time.monotonic()
+        result = scan(text)
+        self.assertLess(time.monotonic() - t0, 5.0)
+        self.assertEqual([], result.findings)
+
+    def test_scan_text_size_limit(self):
+        # Many short lines, so only the total text limit can refuse.
+        text = ("x" * 100 + "\n") * 52000
+        self.assertGreater(len(text), 5 * 1024 * 1024)
+        with self.assertRaises(maskline.ScanRefused):
+            scan(text)
+
+    def test_unknown_tool_name_not_echoed(self):
+        import io
+
+        srv = mcp_server.MasklineServer(str(REPO))
+        secret_name = FAKE_GH
+        outstream = io.StringIO()
+        line = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": secret_name, "arguments": {}}}
+        )
+        mcp_server.serve(srv, io.StringIO(line + "\n"), outstream)
+        reply = json.loads(outstream.getvalue().splitlines()[0])
+        blob = json.dumps(reply)
+        self.assertTrue(reply["result"]["isError"])
+        self.assertEqual("unknown tool", reply["result"]["content"][0]["text"])
+        self.assertNotIn(secret_name, blob)
+        # The stderr capture runs through a subprocess below; here the
+        # result must hold no name at all.
+        self.assertNotIn("tool=", blob)
+
+    def test_malformed_params_give_error_not_crash(self):
+        srv = mcp_server.MasklineServer(str(REPO))
+        cases = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": "bogus"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": 42, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "scan_text", "arguments": "bogus"}},
+            {"jsonrpc": "2.0", "id": 4, "method": "initialize", "params": [1]},
+        ]
+        for case in cases:
+            reply = mcp_server.handle_message(srv, case)
+            self.assertIsNotNone(reply)
+            self.assertIn("error" if "error" in reply else "result", reply)
+
+    def test_batch_and_nonobject_give_error_reply(self):
+        import io
+
+        srv = mcp_server.MasklineServer(str(REPO))
+        instream = io.StringIO("[{\"a\": 1}]\n42\n")
+        outstream = io.StringIO()
+        mcp_server.serve(srv, instream, outstream)
+        replies = [json.loads(x) for x in outstream.getvalue().splitlines()]
+        self.assertEqual(2, len(replies))
+        for reply in replies:
+            self.assertEqual(-32600, reply["error"]["code"])
+
+    def test_nested_brackets_give_parse_error(self):
+        import io
+
+        srv = mcp_server.MasklineServer(str(REPO))
+        instream = io.StringIO("[" * 100000 + "\n")
+        outstream = io.StringIO()
+        mcp_server.serve(srv, instream, outstream)
+        replies = [json.loads(x) for x in outstream.getvalue().splitlines()]
+        self.assertEqual(1, len(replies))
+        self.assertEqual(-32700, replies[0]["error"]["code"])
+
+    def test_parse_error_holds_no_input(self):
+        import io
+
+        srv = mcp_server.MasklineServer(str(REPO))
+        secret = FAKE_BEARER
+        instream = io.StringIO("not json " + secret + "\n")
+        outstream = io.StringIO()
+        mcp_server.serve(srv, instream, outstream)
+        self.assertNotIn(secret, outstream.getvalue())
+
+    def test_merge_extends_span_end(self):
+        text = "Authorization: Bearer " + FAKE_BEARER + "\n"
+        result = scan(text)
+        self.assertNotIn(FAKE_BEARER, result.redacted_text)
+        for i in range(len(FAKE_BEARER) - 7):
+            self.assertNotIn(FAKE_BEARER[i : i + 8], result.redacted_text)
+
+    def test_sibling_prefix_path_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            root.mkdir()
+            sibling = base / "rootx"
+            sibling.mkdir()
+            (sibling / "leak.txt").write_text(
+                "API_KEY=" + FAKE_KEY + "\n", encoding="utf-8"
+            )
+            with self.assertRaises(maskline.ScanRefused):
+                maskline.scan_file("../rootx/leak.txt", str(root), RULES, SETTINGS)
+
+    def test_refusal_message_holds_no_path(self):
+        marker = "SECRET" + "MARK" + "ER12345"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            root.mkdir()
+            with self.assertRaises(maskline.ScanRefused) as ctx:
+                maskline.scan_file("../" + marker + ".txt", str(root), RULES, SETTINGS)
+            self.assertNotIn(marker, str(ctx.exception))
+
+    def test_unreadable_file_refused(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("mode 000 is readable as root")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "no-read.txt"
+            target.write_text("API_KEY=" + FAKE_KEY + "\n", encoding="utf-8")
+            os.chmod(target, 0)
+            try:
+                with self.assertRaises(maskline.ScanRefused) as ctx:
+                    maskline.scan_file("no-read.txt", str(root), RULES, SETTINGS)
+                self.assertNotIn(FAKE_KEY, str(ctx.exception))
+            finally:
+                os.chmod(target, 0o644)
+
+    def test_overlong_path_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            long_rel = "/".join(["a" * 200] * 40) + ".txt"
+            with self.assertRaises(maskline.ScanRefused):
+                maskline.scan_file(long_rel, str(root), RULES, SETTINGS)
+
+    def test_nul_byte_path_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(maskline.ScanRefused):
+                maskline.scan_file("a\x00b.txt", tmp, RULES, SETTINGS)
+
+    def test_error_result_holds_no_arguments(self):
+        import io
+
+        srv = mcp_server.MasklineServer(str(REPO))
+        secret = FAKE_KEY
+        line = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "scan_file", "arguments": {"path": secret}}}
+        )
+        outstream = io.StringIO()
+        mcp_server.serve(srv, io.StringIO(line + "\n"), outstream)
+        self.assertNotIn(secret, outstream.getvalue())
+
+    def test_stderr_holds_no_input_text(self):
+        secret = FAKE_BEARER
+        line = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "scan_text",
+                        "arguments": {"text": "Authorization: Bearer " + secret}}}
+        )
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "server.py"), "--root", str(REPO)],
+            input=line + "\n", capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotIn(secret, proc.stderr)
+        self.assertNotIn(secret, proc.stdout)
+
+    def test_stdout_is_valid_json_lines_only(self):
+        secret = FAKE_KEY
+        line = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "scan_text",
+                        "arguments": {"text": "API_KEY=" + secret}}}
+        )
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "server.py"), "--root", str(REPO)],
+            input=line + "\n", capture_output=True, text=True, timeout=30,
+        )
+        for out_line in proc.stdout.splitlines():
+            json.loads(out_line)
+        self.assertNotIn(secret, proc.stdout)
+
+    def test_invalid_utf8_on_stdin(self):
+        ping = b'{"jsonrpc": "2.0", "id": 9, "method": "ping"}\n'
+        raw = ping + b"bad \xff\xfe line\n" + ping
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "server.py"), "--root", str(REPO)],
+            input=raw, capture_output=True, timeout=30,
+        )
+        self.assertEqual(0, proc.returncode)
+        self.assertNotIn(b"Traceback", proc.stderr)
+        replies = [json.loads(x) for x in proc.stdout.decode("utf-8").splitlines()]
+        self.assertEqual(3, len(replies))
+        self.assertEqual(-32700, replies[1]["error"]["code"])
+        self.assertEqual(9, replies[0]["id"])
+        self.assertEqual(9, replies[2]["id"])
+
+    def test_display_name_redacts_secret_shapes(self):
+        self.assertEqual("build.log", mcp_server.display_name("path/to/build.log"))
+        long_secret = FAKE_BEARER
+        self.assertNotEqual(long_secret, mcp_server.display_name(long_secret))
+        self.assertNotIn("FAKE", mcp_server.display_name("x/" + long_secret))
+
+    def test_demo_trailing_newlines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [sys.executable, str(REPO / "server.py"), "--demo"],
+                cwd=tmp, capture_output=True, text=True, timeout=30,
+            )
+            self.assertTrue(proc.stdout.endswith("\n"))
+            self.assertFalse(proc.stdout.endswith("\n\n"))
+            readme_path = REPO / "README.md"
+            if readme_path.is_file():
+                readme = readme_path.read_text(encoding="utf-8")
+                import re
+
+                blocks = re.findall(r"```text\n(.*?)```", readme, re.S)
+                self.assertTrue(blocks)
+                self.assertEqual(blocks[0], proc.stdout)
+
+
 # --- Exit codes ---------------------------------------------------------------
 
 

@@ -20,6 +20,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 FILES = [
+    "README.md",
     "maskline.py",
     "server.py",
     "rules.toml",
@@ -105,12 +106,12 @@ MUTANTS = [
     },
     {
         "id": "M8",
-        "name": "size limit removed",
+        "name": "text size limit removed",
         "file": "maskline.py",
-        "old": "    if size > max_bytes:",
+        "old": "    if len(text) > MAX_SCAN_TEXT_CHARS:",
         "new": "    if False:",
         "tests": [
-            "test_maskline.TestScanFileLimits.test_scan_file_too_large_refused"
+            "test_maskline.TestReviewFixRound1.test_scan_text_size_limit"
         ],
     },
     {
