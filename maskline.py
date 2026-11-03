@@ -30,12 +30,25 @@ NOT_CHECKED_NOTE = (
 HEX_ONLY_MAX = 40  # a git-commit-sized hex run is not a finding
 VALUE_GROUPS = ("value", "run")  # regex groups that hold the secret span
 
+# Hard limits for scan_text (B1). The bounded name patterns in
+# rules.toml keep each line fast; these limits keep the whole scan
+# bounded even for hostile text.
+MAX_SCAN_TEXT_CHARS = 5242880  # the same limit as max_file_bytes
+MAX_LINE_CHARS = 1048576
+_CHUNK_CHARS = 262144
+_NAME_CHUNK_OVERLAP = 80
+
 HEX_RE = re.compile(r"[0-9A-Fa-f]+")
 UUID_RE = re.compile(
     r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
 )
 SHA256_RE = re.compile(r"[0-9A-Fa-f]{64}")
+SECRET_NAME_KEYWORD_RE = re.compile(
+    r"SECRET|TOKEN|PASSWORD|PASSWD|PWD|API[_-]?KEY|ACCESS[_-]?KEY|"
+    r"PRIVATE[_-]?KEY|CREDENTIAL",
+    re.IGNORECASE,
+)
 DATA_URL_MARK = "data:image/"
 END_OF_LINE = "\n"
 
@@ -304,33 +317,89 @@ def _drop_filter(
 # Scan
 
 
+def _collect_candidates(
+    line: str, rules: list[Rule], settings: dict[str, object]
+) -> list[tuple[int, int, str, str]]:
+    """Run every rule over one (sub)line and return the raw candidates.
+
+    The name keyword check runs here, in code, on the bounded name
+    group (B1). It costs a search over at most 64 characters, so the
+    whole line stays fast even when the line repeats a keyword.
+    """
+    hidden = hidden_spans_for_line(line)
+    candidates: list[tuple[int, int, str, str]] = []  # start,end,rule,value
+    for rule in rules:
+        for match in rule.regex.finditer(line):
+            if rule.name in ("secret-assignment", "shell-trace"):
+                try:
+                    name = match.group("name")
+                except IndexError:
+                    name = None
+                if name is not None and not SECRET_NAME_KEYWORD_RE.search(name):
+                    continue
+            span = value_span(match)
+            if span is None:
+                span = match.span()
+            start, end = span
+            if start >= end:
+                continue
+            value = line[start:end]
+            if _inside_hidden(start, end, hidden):
+                continue
+            if _drop_filter(value, rule, rule.name, settings):
+                continue
+            candidates.append((start, end, rule.name, value))
+    return candidates
+
+
 def scan_text(
     text: str, rules: list[Rule], settings: dict[str, object]
 ) -> ScanResult:
-    """Scan text line by line. Merge overlapping spans on each line."""
+    """Scan text line by line. Merge overlapping spans on each line.
+
+    Limits (B1): text longer than MAX_SCAN_TEXT_CHARS and a line
+    longer than MAX_LINE_CHARS are refused. A long line at or below
+    the limit is scanned in bounded chunks that overlap by
+    _NAME_CHUNK_OVERLAP characters, so chunk borders stay near-exact
+    (README Limitations).
+    """
+    if not isinstance(text, str):
+        raise ScanRefused("scan refused: text must be a string")
+    if len(text) > MAX_SCAN_TEXT_CHARS:
+        raise ScanRefused(
+            "scan refused: text exceeds the 5 MB limit"
+        )
     lines = text.split("\n")
+    for line in lines:
+        if len(line) > MAX_LINE_CHARS:
+            raise ScanRefused(
+                "scan refused: line exceeds the 1 MB limit"
+            )
     all_findings: list[Finding] = []
     redacted_lines: list[str] = []
 
     for line_index, line in enumerate(lines):
         line_number = line_index + 1
-        hidden = hidden_spans_for_line(line)
-        candidates: list[tuple[int, int, str, str]] = []  # start,end,rule,value
-
-        for rule in rules:
-            for match in rule.regex.finditer(line):
-                span = value_span(match)
-                if span is None:
-                    span = match.span()
-                start, end = span
-                if start >= end:
-                    continue
-                value = line[start:end]
-                if _inside_hidden(start, end, hidden):
-                    continue
-                if _drop_filter(value, rule, rule.name, settings):
-                    continue
-                candidates.append((start, end, rule.name, value))
+        if len(line) <= _CHUNK_CHARS:
+            candidates = _collect_candidates(line, rules, settings)
+        else:
+            candidates = []
+            seen: set[tuple[int, int, str]] = set()
+            offset = 0
+            while offset < len(line):
+                window = line[
+                    offset:offset + _CHUNK_CHARS + _NAME_CHUNK_OVERLAP
+                ]
+                for start, end, rule_name, value in _collect_candidates(
+                    window, rules, settings
+                ):
+                    key = (offset + start, offset + end, rule_name)
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append(
+                            (offset + start, offset + end, rule_name, value)
+                        )
+                offset += _CHUNK_CHARS
 
         merged = merge_spans(candidates)
         for start, end, rule_name, value in merged:
@@ -423,13 +492,31 @@ def scan_file(
 ) -> ScanResult:
     """Read one file below root and scan it. Refuse paths outside the
     root, symlink escapes, files that are too large, binary files and
-    files that are not valid UTF-8. Messages hold no file content."""
+    files that are not valid UTF-8. Messages hold no file content.
+
+    Every OSError (an unreadable file, a path that is too long, a
+    loop) becomes the same refusal (B2), so a normal client error
+    never ends the server or prints a traceback."""
     raw_path = str(path)
-    root_path = Path(root).resolve()
+    if "\x00" in raw_path or "\x00" in str(root):
+        raise ScanRefused(
+            "scan_file refused: file not found below the root folder"
+        )
+    try:
+        root_path = Path(root).resolve()
+    except (OSError, RuntimeError):
+        raise ScanRefused(
+            "scan_file refused: file not found below the root folder"
+        ) from None
     target = Path(raw_path)
     if not target.is_absolute():
         target = root_path / raw_path
-    resolved = target.resolve()
+    try:
+        resolved = target.resolve()
+    except (OSError, RuntimeError):
+        raise ScanRefused(
+            "scan_file refused: file not found below the root folder"
+        ) from None
     try:
         inside = os.path.commonpath([str(resolved), str(root_path)]) == str(
             root_path
@@ -440,10 +527,19 @@ def scan_file(
         raise ScanRefused(
             "scan_file refused: path is outside the allowed root folder"
         )
-    if not Path(resolved).is_file():
+    try:
+        is_file = Path(resolved).is_file()
+    except OSError:
+        is_file = False
+    if not is_file:
         raise ScanRefused("scan_file refused: file not found below the root folder")
     max_bytes = int(settings.get("max_file_bytes", 5242880))
-    size = Path(resolved).stat().st_size
+    try:
+        size = Path(resolved).stat().st_size
+    except OSError:
+        raise ScanRefused(
+            "scan_file refused: file not found below the root folder"
+        ) from None
     if size > max_bytes:
         raise ScanRefused(
             "scan_file refused: file exceeds the 5 MB limit (file size "
@@ -452,7 +548,12 @@ def scan_file(
             + str(max_bytes)
             + " bytes)"
         )
-    raw = Path(resolved).read_bytes()
+    try:
+        raw = Path(resolved).read_bytes()
+    except OSError:
+        raise ScanRefused(
+            "scan_file refused: file not found below the root folder"
+        ) from None
     if b"\x00" in raw[:4096]:
         raise ScanRefused("scan_file refused: binary file")
     try:
