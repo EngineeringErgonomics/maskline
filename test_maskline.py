@@ -824,6 +824,308 @@ class TestReviewFixRound2(unittest.TestCase):
                 self.assertEqual(0, proc.returncode)
 
 
+
+class TestReviewFixRound3(unittest.TestCase):
+    # Round-2 blockers: B1 dash run, B2 file names, N1 regressions,
+    # and survivors V10, V11, V13, V15, V22, V27, V29.
+
+    _RULE_PREFIX = {
+        "pem-private-key": "----BEGIN ",
+        "token-prefix": "gh",
+        "bearer-token": "Bearer ",
+        "secret-assignment": "SECRET=",
+        "shell-trace": "+ ",
+        "shell-trace-echo": "+ echo ",
+        "shell-trace-header": "+ curl",
+        "high-entropy-run": "aB3d",
+    }
+
+    def test_every_rule_times_fast_on_runs(self):
+        import time
+
+        # Per-rule bar: every rule must finish each 1 MiB line it can
+        # attempt to match in under 2 s; scan_text below repeats the
+        # same runs with every rule enabled.
+        for rule in RULES:
+            for shape in ("-", "=", "+", "/", ".", "_", "9", "a", " ", "\t", ":", "'", "`"):
+                line = self._RULE_PREFIX[rule.name] + shape * maskline.MAX_LINE_CHARS
+                line = line[: maskline.MAX_LINE_CHARS]
+                t0 = time.monotonic()
+                list(rule.regex.finditer(line))
+                dt = time.monotonic() - t0
+                self.assertLess(dt, 2.0, rule.name + " on " + repr(shape))
+        for shape in ("-", "=", "+", "/", ".", "_", "9", "a", " ", "\t", ":", "'", "`", "pwd-", "data:image/png;base64,"):
+            line = (shape * (1048576 // len(shape) + 1))[:1048576]
+            t0 = time.monotonic()
+            result = scan(line)
+            dt = time.monotonic() - t0
+            self.assertLess(dt, 2.0, "scan_text on " + repr(shape)[:20])
+            self.assertIsInstance(result, maskline.ScanResult)
+
+    def test_pem_bounded_pattern(self):
+        import time
+
+        t0 = time.monotonic()
+        result = scan("-" * 1048576 + "\n")
+        self.assertLess(time.monotonic() - t0, 2.0)
+        self.assertEqual([], result.findings)
+        pos = scan("-" * 5 + "BEGIN PRIVATE KEY" + "-" * 5 + "\n")
+        self.assertIn("pem-private-key", rule_names(pos))
+
+    def test_n1_detection_shapes(self):
+        value = FAKE_ENTROPY[:20]
+        cases = [
+            "GET /login?user=admin&password=" + value + " HTTP/1.1",
+            "Server=db1;Database=app;User Id=sa;Password=" + value + ";",
+            "x=1&api_key=" + value,
+            "mode=fastpath,SECRET_TOKEN=" + value,
+            "foo=barbazqux;TOKEN=" + value,
+            "A" * 57 + "_PASSWORD=" + value,
+            "B" * 72 + "_API_KEY=" + value,
+            "+ export " + "C" * 70 + "_SECRET=" + value,
+            "user:admin:password:" + value,
+        ]
+        for line in cases:
+            result = scan(line + "\n")
+            self.assertNotIn(value, result.redacted_text, line[:30])
+
+    def test_v10_window_overlap_finds_boundary(self):
+        pad = maskline._CHUNK_CHARS - 20
+        line = "x" * pad + " " + FAKE_ENTROPY
+        self.assertLess(pad + 1, 65536)
+        self.assertGreater(pad + 1 + len(FAKE_ENTROPY), maskline._CHUNK_CHARS)
+        result = scan(line)
+        self.assertIn("high-entropy-run", rule_names(result))
+        start = pad + 1
+        for f in result.findings:
+            if f.rule == "high-entropy-run":
+                self.assertEqual(start, f.start)
+                self.assertEqual(start + len(FAKE_ENTROPY), f.end)
+                self.assertGreater(f.end, maskline._CHUNK_CHARS)
+        self.assertNotIn(FAKE_ENTROPY, result.redacted_text)
+
+    def test_v11_window_duplicate_filter(self):
+        # scan_text de-duplicates overlapping window hits. Observe the
+        # candidates before merge_spans, where the duplicate filter is
+        # externally visible.
+        captured = []
+        call_offsets = []
+        original_merge = maskline.merge_spans
+        original_collect = maskline._collect_candidates
+
+        def merge_spy(candidates):
+            captured.append(list(candidates))
+            return original_merge(candidates)
+
+        def collect_spy(line, rules, settings):
+            if line_counts:
+                call_offsets.append(line_counts[0])
+                line_counts[0] += maskline._CHUNK_CHARS
+            return original_collect(line, rules, settings)
+
+        def restore_spies():
+            maskline.merge_spans = original_merge
+            maskline._collect_candidates = original_collect
+
+        self.addCleanup(restore_spies)
+        maskline.merge_spans = merge_spy
+        maskline._collect_candidates = collect_spy
+        line_counts = [0]
+        start = maskline._CHUNK_CHARS + 100
+        local_start = start - maskline._CHUNK_CHARS
+        self.assertLess(local_start, maskline._NAME_CHUNK_OVERLAP)
+        self.assertGreater(start, maskline._CHUNK_CHARS)
+        self.assertLess(local_start + len(FAKE_ENTROPY), maskline._NAME_CHUNK_OVERLAP)
+        line = "x" * start + " " + FAKE_ENTROPY + " " + "y" * 300
+        result = scan(line)
+        self.assertEqual([0, maskline._CHUNK_CHARS], call_offsets)
+        seen = [
+            candidate[:3]
+            for batch in captured
+            for candidate in batch
+            if candidate[2] == "high-entropy-run"
+        ]
+        self.assertEqual(1, len(seen), seen)
+        self.assertEqual(
+            [(start + 1, start + 1 + len(FAKE_ENTROPY), "high-entropy-run")],
+            seen,
+        )
+        hits = [
+            f for f in result.findings if f.rule == "high-entropy-run"
+        ]
+        self.assertEqual(1, len(hits))
+        self.assertNotIn(FAKE_ENTROPY, result.redacted_text)
+
+    def test_v29_window_step_keeps_overlap(self):
+        # The V29 step mutation advances by chunk+overlap, which skips
+        # the material that the real second window must rescan. Put an
+        # assignment whose value crosses the first window's end: the
+        # first window sees only a truncated value, while the real
+        # step finds the full one in the second window.
+        assignment_start = maskline._CHUNK_CHARS + maskline._NAME_CHUNK_OVERLAP - 13
+        line = "x" * assignment_start + " API_KEY=" + FAKE_KEY
+        value_start = line.index(FAKE_KEY)
+
+        seen_offsets = []
+        original_collect = maskline._collect_candidates
+
+        def collect_spy(window, rules, settings):
+            seen_offsets.append(len(window))
+            return original_collect(window, rules, settings)
+
+        self.addCleanup(
+            setattr, maskline, "_collect_candidates", original_collect
+        )
+        maskline._collect_candidates = collect_spy
+        result = scan(line)
+        self.assertEqual(2, len(seen_offsets))
+        self.assertEqual(
+            maskline._CHUNK_CHARS + maskline._NAME_CHUNK_OVERLAP,
+            seen_offsets[0],
+        )
+        hits = [
+            f for f in result.findings if f.rule == "secret-assignment"
+        ]
+        self.assertEqual(1, len(hits), hits)
+        self.assertEqual(value_start, hits[0].start)
+        self.assertEqual(value_start + len(FAKE_KEY), hits[0].end)
+        self.assertEqual("EX****56", hits[0].masked)
+        self.assertNotIn(FAKE_KEY, result.redacted_text)
+
+    def test_v13_argument_error_holds_no_input(self):
+        secret = FAKE_KEY
+        srv = mcp_server.MasklineServer(str(REPO))
+        reply = mcp_server.handle_message(
+            srv,
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "scan_text",
+                        "arguments": {"text": [secret]}}},
+        )
+        self.assertNotIn(secret, json.dumps(reply))
+
+    def test_v15_last_catch_holds_no_input(self):
+        class BrokenServer(mcp_server.MasklineServer):
+            pass
+
+        secret = FAKE_KEY
+        srv = BrokenServer(str(REPO))
+
+        def explode(name, arguments):
+            raise RuntimeError(secret)
+
+        srv.call_tool = explode  # type: ignore[method-assign]
+        reply = mcp_server.handle_message(
+            srv,
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "scan_text",
+                        "arguments": {"text": "API_KEY=" + secret}}},
+        )
+        blob = json.dumps(reply)
+        self.assertEqual(-32603, reply["error"]["code"])
+        self.assertEqual("Internal error", reply["error"]["message"])
+        self.assertNotIn(secret, blob)
+
+    def test_v22_data_url_span_bounded(self):
+        line = (
+            "image data:image/png;base64," + "A" * maskline._MAX_HIDDEN_CHARS
+            + FAKE_GH + " end"
+        )
+        start = line.index("A")
+        self.assertEqual(
+            [(start, start + maskline._MAX_HIDDEN_CHARS)],
+            maskline.hidden_spans_for_line(line),
+        )
+        result = scan(line + "\n")
+        hits = [
+            f for f in result.findings
+            if f.rule == "token-prefix"
+            and f.start == start + maskline._MAX_HIDDEN_CHARS
+        ]
+        self.assertEqual(1, len(hits), result.findings)
+        self.assertNotIn(FAKE_GH, result.redacted_text)
+
+        text = (
+            "image data:image/png;base64," + "aB3d" * 3000
+            + " " + FAKE_GH + " end\n"
+        )
+        result = scan(text)
+        self.assertIn("token-prefix", rule_names(result))
+        self.assertNotIn(FAKE_GH, result.redacted_text)
+
+    def test_cli_file_name_shapes(self):
+        tok = FAKE_GH
+        cloud = FAKE_AWS
+        rand = FAKE_ENTROPY
+        names = [
+            tok,
+            tok + ".txt",
+            "log " + tok,
+            tok + " copy.txt",
+            "x@" + tok,
+            "k:" + tok,
+            "a," + tok,
+            "(" + cloud + ").log",
+            "[" + rand + "]",
+            "#" + rand,
+            "e" + rand,
+            tok + ".log.gz",
+            "prefix." + tok + ".log",
+            "log.." + tok + ".txt",
+            "x%" + tok + "%",
+            "my-" + tok + "-notes.md",
+            rand + ".bak",
+            "a" + rand + "z",
+            "u" + rand,
+            "v" * 120,
+        ]
+        secrets = (tok, cloud, rand)
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in names:
+                (Path(tmp) / name).write_text("clean line\n", encoding="utf-8")
+                proc = subprocess.run(
+                    [sys.executable, str(REPO / "server.py"), name,
+                     "--root", tmp],
+                    capture_output=True, text=True, timeout=30,
+                )
+                for secret in secrets:
+                    self.assertNotIn(secret, proc.stdout, name)
+                    self.assertNotIn(secret, proc.stderr, name)
+        # A secret in the folder part is never printed.
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / tok
+            folder.mkdir()
+            (folder / "clean.log").write_text("clean\n", encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(REPO / "server.py"),
+                 tok + "/clean.log", "--root", tmp],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotIn(tok, proc.stdout)
+            self.assertNotIn(tok, proc.stderr)
+
+    def test_v27_cli_refusal_holds_no_path(self):
+        marker = "SECRET" + "MARK" + "ER98765"
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "server.py"),
+             "../" + marker + ".txt", "--root", str(REPO)],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(2, proc.returncode)
+        self.assertNotIn(marker, proc.stdout)
+        self.assertNotIn(marker, proc.stderr)
+
+    def test_display_name_masks_every_part(self):
+        for name in (
+            "log " + FAKE_GH,
+            "x@" + FAKE_GH,
+            "[" + FAKE_ENTROPY + "]",
+            "é" + FAKE_ENTROPY,
+        ):
+            self.assertNotIn(FAKE_GH, mcp_server.display_name(name))
+            self.assertNotIn(FAKE_ENTROPY, mcp_server.display_name(name))
+        self.assertEqual("trace-leak-log.txt", mcp_server.display_name("examples/trace-leak-log.txt"))
+
+
 # --- Exit codes ---------------------------------------------------------------
 
 

@@ -356,22 +356,32 @@ _SAFE_DISPLAY_RE = re.compile(
 
 
 def display_name(name: str) -> str:
-    """A safe display form of a file name for a report header (N2).
+    """A safe display form of a file name for a report header (B2).
 
-    A secret-shaped file name must not reach the report. Keep the
-    name only when it is short and has no secret shape.
+    Only the base name is considered, and the folder part is never
+    printed. Every run of 17 or more characters of letters, digits
+    and the secret delimiters is masked by the same rule as a
+    finding (at most 2 characters at each end); when the name holds
+    a secret-looking keyword, shorter runs are masked too. No other
+    character can defeat the mask.
     """
     base = name.replace("\\", "/").rsplit("/", 1)[-1]
-    if not base or len(base) > 64:
+    if not base:
         return "<file>"
+
+    def _mask(run: str) -> str:
+        if len(run) <= 16:
+            return "****"
+        return run[:2] + "****" + run[-2:]
+
+    masked = re.sub(
+        r"[A-Za-z0-9+/_=-]{17,}", lambda m: _mask(m.group(0)), base
+    )
     if _SAFE_DISPLAY_RE.search(base):
-        return "<redacted-name>"
-    if len(re.sub(r"[A-Za-z0-9._+/=-]", "", base)) < len(base) and len(base) >= 17:
-        # A long run without a path separator may be a secret value
-        # itself; do not print it.
-        if re.fullmatch(r"[A-Za-z0-9._+/=-]{17,}", base):
-            return "<redacted-name>"
-    return base
+        masked = re.sub(
+            r"[A-Za-z0-9+/_=-]{8,}", lambda m: _mask(m.group(0)), masked
+        )
+    return masked
 
 
 def _demo(root: str, rules) -> int:
@@ -400,7 +410,11 @@ def _demo(root: str, rules) -> int:
             result = scan_file(rel, repo_root, _server.rules, _server.settings)
         except ScanRefused as exc:
             blocks.append(
-                "maskline report: " + rel + "\nRefused: " + str(exc) + "\nexit: 2"
+                "maskline report: "
+                + rel
+                + "\nRefused: "
+                + str(exc)
+                + "\nexit: 2"
             )
             worst = max(worst, 2)
             continue

@@ -18,7 +18,7 @@ placeholder_prefixes = ["your-", "<", "$", "["]
 
 [[rule]]
 name = "pem-private-key"
-pattern = '''-{4,}BEGIN (?:[A-Z0-9 ]* )?PRIVATE KEY-{4,}'''
+pattern = '''(?<!-)-{4,64}BEGIN (?:[A-Z0-9 ]{0,32} )?PRIVATE KEY-{4,64}'''
 description = "PEM private key header line"
 
 [[rule]]
@@ -33,12 +33,12 @@ description = "Authorization bearer token"
 
 [[rule]]
 name = "secret-assignment"
-pattern = '''\b(?P<name>[A-Za-z_][A-Za-z0-9_]{0,63})\s*[:=]\s*["']?(?P<value>[^\s"']{8,})'''
+pattern = '''\b(?P<name>[A-Za-z_][A-Za-z0-9_]{0,255})\s*[:=]\s*["']?(?P<value>[^\s"']{8,})'''
 description = "KEY=value line whose key name looks secret"
 
 [[rule]]
 name = "shell-trace"
-pattern = '''^(?P<plus>\+{1,})\s+(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]{0,63})\s*=\s*(?P<value>[^\s"']{8,})'''
+pattern = '''^(?P<plus>\+{1,})\s+(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]{0,255})\s*=\s*(?P<value>[^\s"']{8,})'''
 description = "Shell trace line with a secret name and a value"
 
 [[rule]]

@@ -50,6 +50,45 @@ SECRET_NAME_KEYWORD_RE = re.compile(
     r"PRIVATE[_-]?KEY|CREDENTIAL",
     re.IGNORECASE,
 )
+_SEGMENT_SEP_RE = re.compile(r"[&;,:/]")
+
+def _looks_like_name_value(line: str, start: int) -> bool:
+    """Cheap linear test: identifier, optional spaces, : or =,
+    optional quote, then a value of 8+ chars. Stops at 256 name
+    characters, so one separator costs O(1). A colon directly after
+    the name is its own separator."""
+    limit = min(len(line), start + 8192)
+    i = start
+    if i >= limit:
+        return False
+    ch = line[i]
+    if not (ch.isalpha() and ch.isascii() or ch == "_"):
+        return False
+    i += 1
+    while (
+        i < limit
+        and (line[i].isascii() and (line[i].isalnum() or line[i] == "_"))
+        and i - start < 256
+    ):
+        i += 1
+    j = i
+    while j < limit and line[j] in " \t":
+        j += 1
+    if j >= limit or line[j] not in ":=":
+        return False
+    j += 1
+    while j < limit and line[j] in " \t":
+        j += 1
+    if j < limit and line[j] in "\"'":
+        j += 1
+    count = 0
+    while j < limit and count < 8:
+        if line[j].isspace() or line[j] in "\"'":
+            break
+        j += 1
+        count += 1
+    return count >= 8
+
 DATA_URL_MARK = "data:image/"
 END_OF_LINE = "\n"
 
@@ -334,13 +373,60 @@ def _collect_candidates(
     """Run every rule over one (sub)line and return the raw candidates.
 
     The name keyword check runs here, in code, on the bounded name
-    group (B1). It costs a search over at most 64 characters, so the
+    group (B1). It costs a search over at most 256 characters, so the
     whole line stays fast even when the line repeats a keyword.
     """
     hidden = hidden_spans_for_line(line)
     candidates: list[tuple[int, int, str, str]] = []  # start,end,rule,value
     for rule in rules:
-        for match in rule.regex.finditer(line):
+        matches = list(rule.regex.finditer(line))
+        if rule.name == "secret-assignment":
+            # N1 detection regression: a rejected assignment consumed
+            # the rest of a query, connection-string or argument-chain
+            # value (for example "user=admin&password=V"). Each such
+            # tail is split once on its separators, and only bounded
+            # segments are probed — so no quadratic re-scan is possible.
+            # The manual pre-parse rejects non-candidates (for example
+            # a repeated "data:...;base64," marker) in linear time
+            # before any regex call.
+            seen_spans = {m.span() for m in matches}
+            extra_matches: list = []
+            for match in matches:
+                try:
+                    names = match.group("name")
+                except IndexError:
+                    names = None
+                if names is not None and SECRET_NAME_KEYWORD_RE.search(names):
+                    continue
+                try:
+                    v_start, v_end = match.span("value")
+                except IndexError:
+                    continue
+                if v_start == -1:
+                    continue
+                pos = v_start
+                while pos < v_end and pos < len(line):
+                    m = _SEGMENT_SEP_RE.search(line, pos, v_end)
+                    if m is None:
+                        break
+                    anchor = m.end()
+                    if line[anchor:anchor + 1] == " ":
+                        anchor += 1
+                    pos = anchor
+                    nxt = _SEGMENT_SEP_RE.search(line, pos, v_end)
+                    seg_end = nxt.start() if nxt is not None else v_end
+                    if seg_end - anchor > 8192:
+                        continue
+                    if not _looks_like_name_value(line, anchor):
+                        continue
+                    extra = rule.regex.match(line, anchor)
+                    if extra is not None and extra.span() not in seen_spans:
+                        seen_spans.add(extra.span())
+                        extra_matches.append(extra)
+                        if extra.span("value")[1] > pos:
+                            pos = extra.span("value")[1]
+            matches.extend(extra_matches)
+        for match in matches:
             if rule.name in ("secret-assignment", "shell-trace"):
                 try:
                     name = match.group("name")

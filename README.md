@@ -158,9 +158,11 @@ exit: 1
 - MCP tool results: one JSON text content with `findings`,
   `redacted_text` and `not_checked`. Server log lines on stderr hold
   counts only.
-- Report file names: the command line report header prints a safe
-  display name only. A secret-shaped file name is shown as
-  `<redacted-name>`.
+- Report file names: the command line report header prints only the
+  safe display form of the base name (the folder is never printed).
+  Every run of 17 or more secret characters in the base name is masked
+  to at most 2 characters at each end. An MCP result never prints the
+  path or the name.
 - Limits: `scan_text` accepts at most 5 MB of text. A line longer
   than 1 MB is refused; a longer line at or below the limit is
   scanned in bounded chunks with a small overlap, so detection at
